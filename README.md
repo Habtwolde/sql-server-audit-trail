@@ -1,68 +1,61 @@
 # SQL Server Audit Trail
 
-A first local prototype for exploring continuous SQL Server DML/DDL audit reporting, monthly CSV generation, and report review.
+Live SQL Server Audit reader and web application for SQL Server **2019 and newer**. This is the first real-integration build, not a certified production release. It reads actual SQL Server audit files over ODBC, stores evidence separately from the demo, and produces monthly CSV reports for review.
 
-## Run locally
+**Start here: [Windows / live SQL Server setup](docs/LIVE_SETUP.md).**
 
-Requires Python 3.10 or newer.
+## Current capabilities
 
-```bash
-python -m venv .venv
-```
+- SQL Server version/edition detection and a connection/read diagnostic.
+- Windows integrated authentication or SQL login for the collector connection.
+- Independent polling worker; no DML or DDL triggers.
+- Persistent record identities and atomic storage prevent duplicate imports on replay/restart.
+- Original audit metadata, SQL text/fragments, account, effective user, timestamp, and available object/client information.
+- Live audit view, collection status, evidence detail, monthly CSV export and approval history.
+- Separate live and demo databases; live mode never seeds sample events.
+- Password-based application accounts, roles, CSRF protection, and a separate report approver.
+- Waitress web entry point for Windows/Linux; container definitions for on-premises/EC2 trials.
 
-Activate the environment, then install and start the app:
+## Important boundaries
 
-```bash
+- Windows authentication for the **SQL connection** is implemented. Windows single sign-on for **web users** is a separate, pending integration. The web app currently uses local password accounts.
+- The evidence store is currently SQLite on one host. A separate SQL Server/PostgreSQL audit repository is pending. Do not share its file across hosts or a network share.
+- The worker replays retained files and deduplicates them. Per-file offsets are persisted for diagnostics, not used to skip records. This prioritizes safe replay in the integration build; performance must be assessed before production.
+- SQL Server Audit `succeeded` is labelled as a permission-check result. It does not establish statement completion or transaction commit.
+- SQL text can span multiple records. Fragments are retained with sequence/group information; automatic statement reassembly is pending. CSV counts are record counts, not unique statement counts.
+- Native auditing only records configured actions. Stored-procedure ownership chaining, dynamic SQL, MERGE/TRUNCATE, denied operations and server/database scope require explicit coverage testing. SELECT is not enabled by the supplied configuration.
+- No automatic detection of every lost/deleted audit file or unaudited operation is claimed. First import includes retained history; deleted history cannot be recovered. Audit disablement, queue/disk failures and retention require operational monitoring.
+- Monthly reports are generated manually in this build. Automatic scheduling and S3 upload are pending.
+- All editions of SQL Server 2019+ are the compatibility target, not a completed test matrix. No real SQL Server instance or Windows SSO host was available during development. Docker files have not yet been built in the development environment.
+
+## Run after configuration
+
+```powershell
 pip install -r requirements.txt
-python app.py
+python manage.py create-user reviewer --role Reviewer
+python manage.py create-user approver --role Approver
+python collector.py --check
+python collector.py --once
+python run_web.py
 ```
 
-Open http://127.0.0.1:5000. The application creates a local SQLite database and seeds sample events on first launch. It does not connect to SQL Server.
+Run `python collector.py` in another terminal for continuous collection. Both processes load `.env`. See the setup guide for prerequisites and the DBA scripts. Open http://127.0.0.1:5000.
 
-Demo identities are available from the sign-in page:
+## Automated checks
 
-- `demo.viewer` — view the audit trail and reports.
-- `demo.reviewer` — generate reports and review reports created by someone else.
-- `demo.approver` — same prototype permissions as reviewer.
-- `demo.admin` — same prototype permissions as reviewer.
-
-The login is intentionally a role selector without passwords. It is only for local demonstration and must not be exposed as a real authentication system.
-
-## Run in a container
-
-```bash
-docker build -t sql-server-audit-trail .
-docker run --rm -p 5000:5000 -v audit-data:/app/instance sql-server-audit-trail
+```powershell
+python -m unittest discover -s tests -v
 ```
 
-For any shared deployment, set a strong `FLASK_SECRET_KEY`, use HTTPS behind a production web server or load balancer, and restrict network access. The built-in Flask development server is for local demonstration only.
+These checks use a temporary repository and mocked ODBC responses; they validate application behavior, not native SQL Server capture completeness. `sql/test_scenarios.sql` is a manual test-database script and is never run automatically.
 
-## Prototype features
+## Files
 
-- Sample audit trail with DML and DDL examples, including ALTER/MODIFY, MERGE, and TRUNCATE.
-- Event list and operation filter.
-- Monthly CSV generation with a version number and SHA-256 digest.
-- Review/approval or rejection recorded with reviewer, decision, comment, and time.
-- Local report history in `instance/reports`.
+- `collector.py`: SQL Server Audit reader and polling process.
+- `storage.py`: shared local repository and mode separation.
+- `app.py`, `security.py`: web interface, authentication and permissions.
+- `manage.py`: create application accounts without command-line passwords.
+- `sql/`: DBA setup/permissions and manual test scenarios.
+- `.env.example`: configuration template; never commit your `.env`.
 
-## Agreed product scope
-
-- Continuously capture SQL Server DML and DDL events, including INSERT, UPDATE, DELETE, CREATE, ALTER/MODIFY, DROP, and TRUNCATE.
-- Record SQL text, executing identity, account, event time, and available server, database, schema, object, application, client host, and outcome details.
-- Collect in a background process using a dedicated identity and store events in a separate audit database.
-- Generate monthly CSV reports and retain report history in configured storage, including S3.
-- Support Windows-authenticated access, with review and approval roles.
-- Deploy on a PC for development, an on-premises server, or AWS EC2.
-- Do not use DML or DDL triggers.
-
-## Next implementation stages
-
-1. Confirm the audit event schema and report format against the existing report example.
-2. Add a collector interface and simulated polling source.
-3. Implement durable collection checkpoints and missed-event monitoring.
-4. Select and validate the SQL Server capture method and minimum permissions for the target version/edition.
-5. Replace demo sign-in with Windows/organizational authentication and map identities to application roles.
-6. Add production storage options, including S3, and deployment configuration.
-7. Validate event coverage and recovery using dummy users and SQL scenarios.
-
-The current version is a workflow prototype. It does not yet capture SQL Server activity, use Windows authentication, store events in a separate database, or upload to S3. Polling frequency alone cannot guarantee complete capture; completeness must be proven against the target SQL Server audit configuration.
+To revisit the demo, set `AUDIT_MODE=demo` in `.env` and restart the web process. The original `instance/audit-demo.sqlite3` is preserved. Do not run the live collector in demo mode. Old demo report paths remain usable if their files still exist.
