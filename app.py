@@ -2,22 +2,17 @@ import csv
 import hashlib
 import io
 import os
-import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from functools import wraps
 
 from flask import Flask, abort, redirect, render_template_string, request, send_file, session, url_for
 
-BASE_DIR = Path(__file__).resolve().parent
-INSTANCE_DIR = Path(os.environ.get("AUDIT_INSTANCE_DIR", BASE_DIR / "instance"))
-REPORT_DIR = Path(os.environ.get("AUDIT_REPORT_DIR", INSTANCE_DIR / "reports"))
-DB_PATH = Path(os.environ.get("AUDIT_DB_PATH", INSTANCE_DIR / "audit-demo.sqlite3"))
-INSTANCE_DIR.mkdir(parents=True, exist_ok=True)
-REPORT_DIR.mkdir(parents=True, exist_ok=True)
+from storage import MODE, BASE_DIR, INSTANCE_DIR, REPORT_DIR, DB_PATH, connect, initialize_store
+from security import configure_security
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "local-demo-only-change-this")
+configure_security(app, MODE)
 
 
 DEMO_USERS = {
@@ -27,55 +22,11 @@ DEMO_USERS = {
     "demo.admin": "Administrator",
 }
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS audit_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_time TEXT NOT NULL,
-    server_name TEXT NOT NULL,
-    database_name TEXT NOT NULL,
-    login_name TEXT NOT NULL,
-    effective_user TEXT NOT NULL,
-    application_name TEXT NOT NULL,
-    client_host TEXT NOT NULL,
-    schema_name TEXT NOT NULL,
-    object_name TEXT NOT NULL,
-    operation TEXT NOT NULL,
-    outcome TEXT NOT NULL,
-    statement TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS reports (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    period TEXT NOT NULL,
-    version INTEGER NOT NULL,
-    created_at TEXT NOT NULL,
-    created_by TEXT NOT NULL,
-    event_count INTEGER NOT NULL,
-    file_path TEXT NOT NULL,
-    sha256 TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'Pending',
-    UNIQUE(period, version)
-);
-CREATE TABLE IF NOT EXISTS report_reviews (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    report_id INTEGER NOT NULL REFERENCES reports(id),
-    reviewer TEXT NOT NULL,
-    decision TEXT NOT NULL,
-    comment TEXT NOT NULL,
-    decided_at TEXT NOT NULL
-);
-"""
-
-
-def connect():
-    db = sqlite3.connect(DB_PATH)
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA foreign_keys = ON")
-    return db
-
-
 def initialize():
+    initialize_store()
+    if MODE != "demo":
+        return
     with connect() as db:
-        db.executescript(SCHEMA)
         count = db.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
         if count == 0:
             now = datetime.now(timezone.utc)
@@ -140,28 +91,45 @@ th,td{border-bottom:1px solid #e2e8f0;padding:9px;text-align:left;vertical-align
 pre{white-space:pre-wrap;word-break:break-word;margin:0;max-width:520px}.pill{padding:4px 8px;border-radius:12px;background:#e8f2ff}
 .alert{background:#fff7db;padding:12px;border-radius:6px}.actions{display:flex;gap:8px;align-items:center}
 </style></head><body>
-<header class="top"><div><b>SQL Server Audit Trail</b><div class="muted" style="color:#c3d3e5">Demo mode · simulated events</div></div>
+<header class="top"><div><b>SQL Server Audit Trail</b><div class="muted" style="color:#c3d3e5">{{ mode_label }}</div></div>
 {% if user %}<div class="nav"><a href="{{ url_for('home') }}">Dashboard</a><a href="{{ url_for('events') }}">Audit trail</a><a href="{{ url_for('reports') }}">Reports</a>
-<span>{{ user }} · {{ role }}</span> <a href="{{ url_for('logout') }}">Sign out</a></div>{% endif %}</header>
+<span>{{ user }} · {{ role }}</span> <form method="post" action="{{ url_for('logout') }}" style="display:inline"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button>Sign out</button></form></div>{% endif %}</header>
 <main>{% with messages=get_flashed_messages() %}{% for msg in messages %}<div class="alert">{{ msg }}</div>{% endfor %}{% endwith %}
 {{ body|safe }}</main></body></html>
 """
 
 
 def page(title, body, **context):
-    return render_template_string(PAGE, title=title, body=render_template_string(body, **context),
-                                  user=session.get("user"), role=session.get("role"))
+    from markupsafe import escape
+    from security import csrf_token
+    rendered = render_template_string(body, **context)
+    import re
+    rendered = re.sub(r'(<form\b[^>]*method="post"[^>]*>)', lambda m: m.group(1) + '<input type="hidden" name="csrf_token" value="' + str(escape(csrf_token())) + '">', rendered, flags=re.I)
+    return render_template_string(PAGE, title=title, body=rendered,
+                                  user=session.get("user"), role=session.get("role"),
+                                  mode_label="Demo mode · simulated events" if MODE == "demo" else "Live mode · SQL Server Audit")
 
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
+    if MODE == "live":
+        from security import password_login
+        error = password_login() if request.method == "POST" else None
+        if error is False:
+            return redirect(url_for("home"))
+        return page("Sign in", """<div class="card"><h1>Sign in</h1>
+        <p>Use an application account created by your administrator.</p>
+        {% if error %}<p class="alert">{{ error }}</p>{% endif %}
+        <form method="post"><label>Username <input name="username" required autocomplete="username"></label>
+        <label>Password <input type="password" name="password" required autocomplete="current-password"></label>
+        <button>Sign in</button></form></div>""", error=error)
     if request.method == "POST":
         username = request.form.get("username", "")
         if username in DEMO_USERS:
             session.clear()
             session["user"] = username
             session["role"] = DEMO_USERS[username]
-            return redirect(request.args.get("next") or url_for("home"))
+            return redirect(url_for("home"))
     body = """
     <div class="card" style="max-width:480px;margin:60px auto"><h1>Sign in to demo</h1>
     <p class="muted">Choose a seeded demo identity. This login is for local demonstration only.</p>
@@ -171,7 +139,7 @@ def login():
     return page("Sign in", body, users=DEMO_USERS)
 
 
-@app.get("/logout")
+@app.post("/logout")
 def logout():
     session.clear()
     return redirect(url_for("login"))
@@ -185,24 +153,49 @@ def home():
         recent = db.execute("SELECT * FROM audit_events ORDER BY event_time DESC LIMIT 8").fetchall()
         pending = db.execute("SELECT COUNT(*) FROM reports WHERE status='Pending'").fetchone()[0]
     body = """
-    <h1>Audit dashboard</h1><p class="muted">Demo data is simulated; no SQL Server is connected.</p>
-    <div class="grid"><div class="card">Captured events<div class="metric">{{ total }}</div></div>
+    <h1>Audit dashboard</h1><p class="muted">{{ source_message }}</p>
+    <div class="grid"><div class="card">Audit records<div class="metric">{{ total }}</div></div>
     <div class="card">Pending report reviews<div class="metric">{{ pending }}</div></div>
-    <div class="card">Collector status<div class="metric" style="font-size:18px">Demo only</div></div></div>
+    <div class="card">Collector status<div class="metric" style="font-size:18px">{{ collector_status }}</div></div></div>
     <div class="card"><h2>Recent activity</h2>{{ table|safe }}</div>"""
-    return page("Dashboard", body, total=total, pending=pending, table=event_table(recent))
+    with connect() as db:
+        states = db.execute("SELECT * FROM collector_state ORDER BY source_id").fetchall()
+    message = "Demo data is simulated; no SQL Server is connected." if MODE == "demo" else "Live audit records. Collector health does not establish complete statement coverage."
+    body += """<div class="card"><h2>Collection health</h2>
+    {% for state in states %}<p><b>{{ state.source_id }}: {{ state.status }}</b><br>
+    Last attempt: {{ state.last_attempt or 'Never' }} · Last successful scan: {{ state.last_success or 'Never' }}<br>
+    {{ state.detail }}<br>Version: {{ state.server_version or 'Unknown' }} · {{ state.edition or '' }}</p>
+    {% else %}<p>No collector has reported yet. Run python collector.py --check, then python collector.py.</p>{% endfor %}
+    <p>Check the last-attempt time: a stopped worker cannot update its status. Retention gaps and unaudited statements cannot be reconstructed.</p></div>"""
+    return page("Dashboard", body, total=total, pending=pending, table=event_table(recent),
+                states=states, source_message=message, collector_status="See health below" if MODE == "live" else "Demo only")
 
 
 def event_table(rows):
-    if not rows:
-        return "<p>No audit events found.</p>"
-    out = ["<table><thead><tr><th>When (UTC)</th><th>Operation</th><th>Database / object</th><th>Login / account</th><th>Outcome</th><th>SQL statement</th></tr></thead><tbody>"]
-    for row in rows:
-        out.append("<tr><td>{}</td><td><span class='pill'>{}</span></td><td>{}.{}.{}</td><td>{}<br>{}</td><td>{}</td><td><details><summary>View SQL</summary><pre>{}</pre></details></td></tr>".format(
-            row["event_time"], row["operation"], row["database_name"], row["schema_name"], row["object_name"],
-            row["login_name"], row["effective_user"], row["outcome"], row["statement"].replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")))
-    out.append("</tbody></table>")
-    return "".join(out)
+    return render_template_string("""{% if not rows %}<p>No audit records found.</p>{% else %}
+    <div style="overflow:auto"><table><tr><th>Event time (UTC)</th><th>Operation / action</th><th>Server / database / object</th>
+    <th>Account / effective user</th><th>Audit result</th><th>SQL / evidence</th></tr>
+    {% for r in rows %}<tr><td>{{ r.event_time }}</td><td>{{ r.operation }}</td>
+    <td>{{ r.server_name }}<br>{{ r.database_name }}.{{ r.schema_name }}.{{ r.object_name }}</td>
+    <td>{{ r.login_name }}<br>{{ r.effective_user }}</td><td>{{ r.outcome }}</td>
+    <td><details><summary>View SQL</summary><pre>{{ r.statement }}</pre></details>
+    <a href="{{ url_for('event_detail', event_id=r.id) }}">Full record</a></td></tr>{% endfor %}</table></div>{% endif %}""", rows=rows)
+
+
+@app.get("/events/<int:event_id>")
+@login_required
+def event_detail(event_id):
+    with connect() as db:
+        row = db.execute("SELECT * FROM audit_events WHERE id=?", (event_id,)).fetchone()
+        source = db.execute("SELECT * FROM source_records WHERE event_id=?", (event_id,)).fetchone()
+    if not row:
+        abort(404)
+    return page("Audit evidence", """<h1>Audit record {{ row.id }}</h1><div class="card">
+    {% for key in row.keys() %}<p><b>{{ key }}</b>: <span style="white-space:pre-wrap">{{ row[key] }}</span></p>{% endfor %}</div>
+    {% if source %}<div class="card"><h2>Source evidence</h2>
+    <p>File: {{ source.file_name }} · offset: {{ source.file_offset }} · sequence: {{ source.sequence_number }} · group: {{ source.sequence_group_id }}</p>
+    <p>SQL text may be one fragment of a larger record. All available fragments are retained separately; sequence metadata is included in CSV.</p>
+    <pre>{{ source.raw_json }}</pre></div>{% endif %}""", row=row, source=source)
 
 
 @app.get("/events")
@@ -211,11 +204,11 @@ def events():
     operation = request.args.get("operation", "")
     with connect() as db:
         if operation:
-            rows = db.execute("SELECT * FROM audit_events WHERE operation=? ORDER BY event_time DESC", (operation,)).fetchall()
+            rows = db.execute("SELECT * FROM audit_events WHERE operation=? ORDER BY event_time DESC LIMIT 500", (operation,)).fetchall()
         else:
-            rows = db.execute("SELECT * FROM audit_events ORDER BY event_time DESC").fetchall()
+            rows = db.execute("SELECT * FROM audit_events ORDER BY event_time DESC LIMIT 500").fetchall()
     body = """
-    <h1>Complete audit trail</h1>
+    <h1>Audit trail</h1><p>Latest 500 matching records. Monthly CSV includes all collected records for the period.</p>
     <div class="card"><form method="get"><label>Operation</label><select name="operation"><option value="">All</option>
     {% for op in operations %}<option {% if selected==op %}selected{% endif %}>{{ op }}</option>{% endfor %}</select><button>Filter</button>
     <a class="button" href="{{ url_for('events') }}">Clear</a></form></div>
@@ -229,17 +222,20 @@ def events():
 def reports():
     with connect() as db:
         rows = db.execute("SELECT * FROM reports ORDER BY created_at DESC").fetchall()
+        reviews = db.execute("SELECT * FROM report_reviews ORDER BY decided_at DESC").fetchall()
     body = """
-    <h1>Monthly reports</h1><div class="card"><h2>Generate CSV</h2>
+    <h1>Monthly reports</h1><p class="alert">Reports contain collected audit records only. Capture coverage is not yet certified. Long SQL may span multiple records; approval does not certify capture completeness.</p><div class="card"><h2>Generate CSV</h2>
     <form method="post" action="{{ url_for('generate_report') }}"><label>Month</label>
     <input type="month" name="period" required value="{{ current_month }}">
     <button>Generate report</button></form><p class="muted">Each generation creates a new version and records its SHA-256 digest.</p></div>
-    <div class="card"><h2>Report history</h2>{% if rows %}<table><tr><th>Period</th><th>Version</th><th>Created</th><th>Events</th><th>Status</th><th>Digest</th><th>Actions</th></tr>
+    <div class="card"><h2>Report history</h2>{% if rows %}<table><tr><th>Period</th><th>Version</th><th>Created</th><th>Records</th><th>Status</th><th>Digest</th><th>Actions</th></tr>
     {% for r in rows %}<tr><td>{{ r.period }}</td><td>v{{ r.version }}</td><td>{{ r.created_at }}<br>by {{ r.created_by }}</td><td>{{ r.event_count }}</td><td>{{ r.status }}</td><td><code>{{ r.sha256[:14] }}…</code></td><td><a href="{{ url_for('download_report', report_id=r.id) }}">CSV</a>
-    {% if r.status=='Pending' and role in ['Reviewer','Approver','Administrator'] %}<form class="actions" method="post" action="{{ url_for('decide_report', report_id=r.id) }}">
+    {% if r.status=='Pending' and r.created_by != user and role in ['Reviewer','Approver','Administrator'] %}<form class="actions" method="post" action="{{ url_for('decide_report', report_id=r.id) }}">
     <input name="comment" placeholder="Optional comment"><button name="decision" value="Approved">Approve</button><button name="decision" value="Rejected">Reject</button></form>{% endif %}</td></tr>{% endfor %}</table>
-    {% else %}<p class="muted">No reports generated yet.</p>{% endif %}</div>"""
-    return page("Reports", body, rows=rows, role=session["role"], current_month=datetime.now().strftime("%Y-%m"))
+    {% else %}<p class="muted">No reports generated yet.</p>{% endif %}</div>
+    <div class="card"><h2>Decision history</h2><table><tr><th>Report ID</th><th>User</th><th>Decision</th><th>When (UTC)</th><th>Comment</th></tr>
+    {% for item in reviews %}<tr><td>{{ item.report_id }}</td><td>{{ item.reviewer }}</td><td>{{ item.decision }}</td><td>{{ item.decided_at }}</td><td>{{ item.comment }}</td></tr>{% endfor %}</table></div>"""
+    return page("Reports", body, rows=rows, reviews=reviews, role=session["role"], user=session["user"], current_month=datetime.now(timezone.utc).strftime("%Y-%m"))
 
 
 @app.post("/reports/generate")
@@ -248,12 +244,15 @@ def generate_report():
     period = request.form.get("period", "")
     try:
         start = datetime.strptime(period, "%Y-%m")
+        if start.strftime("%Y-%m") != period or start.year >= 9999:
+            raise ValueError("Invalid month")
     except ValueError:
         abort(400)
     end = datetime(start.year + (start.month == 12), 1 if start.month == 12 else start.month + 1, 1)
     start_iso = start.isoformat()
     end_iso = end.isoformat()
     with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
         rows = db.execute("SELECT * FROM audit_events WHERE event_time >= ? AND event_time < ? ORDER BY event_time",
                            (start_iso, end_iso)).fetchall()
         version = db.execute("SELECT COALESCE(MAX(version),0)+1 FROM reports WHERE period=?", (period,)).fetchone()[0]
@@ -262,9 +261,11 @@ def generate_report():
                                 len(rows), "", "", "Pending")).lastrowid
         output = io.StringIO(newline="")
         writer = csv.writer(output)
-        writer.writerow(["Event ID","Event Time UTC","Server","Database","Login","Effective User","Application","Client Host","Schema","Object","Operation","Outcome","SQL Statement"])
+        writer.writerow(["Event ID","Event Time UTC","Server","Database","Login","Effective User","Application","Client Host","Schema","Object","Operation","Outcome","SQL Statement","Source ID","Audit File","File Offset","Sequence Number","Sequence Group","Action ID","Collected At UTC"])
         for row in rows:
-            writer.writerow([row[k] for k in ("id","event_time","server_name","database_name","login_name","effective_user","application_name","client_host","schema_name","object_name","operation","outcome","statement")])
+            source = db.execute("SELECT * FROM source_records WHERE event_id=?", (row["id"],)).fetchone()
+            from security import csv_cell
+            writer.writerow([csv_cell(row[k]) for k in ("id","event_time","server_name","database_name","login_name","effective_user","application_name","client_host","schema_name","object_name","operation","outcome","statement")] + [csv_cell(source[k]) if source else "" for k in ("source_id","file_name","file_offset","sequence_number","sequence_group_id","action_id","collected_at")])
         filename = f"audit-{period}-v{version:03}.csv"
         file_path = REPORT_DIR / filename
         data = output.getvalue().encode("utf-8-sig")
@@ -291,6 +292,7 @@ def decide_report(report_id):
     if decision not in ("Approved", "Rejected"):
         abort(400)
     with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
         report = db.execute("SELECT * FROM reports WHERE id=?", (report_id,)).fetchone()
         if not report or report["status"] != "Pending":
             abort(409)
@@ -305,7 +307,7 @@ def decide_report(report_id):
 
 @app.errorhandler(403)
 def forbidden(_error):
-    return page("Access denied", "<div class='card'><h1>Access denied</h1><p>Your demo role cannot perform this action.</p></div>"), 403
+    return page("Access denied", "<div class='card'><h1>Access denied</h1><p>Your role cannot perform this action, or you are reviewing your own report.</p></div>"), 403
 
 
 @app.errorhandler(409)
@@ -317,3 +319,4 @@ initialize()
 
 if __name__ == "__main__":
     app.run(host=os.environ.get("HOST", "127.0.0.1"), port=int(os.environ.get("PORT", "5000")), debug=False)
+
