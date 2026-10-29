@@ -60,12 +60,13 @@ class LiveTests(unittest.TestCase):
         ingest("test-source", record(sequence_number=2,
                session_server_principal_name="OtherAccount", action_id="IN  "))
         self.login("viewer")
-        response = self.client.get("/events", query_string={"account": "ACTOR", "operation": "UPDATE"})
+        response = self.client.get("/events", query_string={"account": "domain\\actor", "operation": "UPDATE"})
         html = response.get_data(as_text=True)
         self.assertIn("&lt;script&gt;visible SQL&lt;/script&gt;", html)
         self.assertNotIn("<summary>View SQL</summary>", html)
-        self.assertNotIn("OtherAccount", html)
-        self.assertIn('value="ACTOR"', html)
+        self.assertNotIn("<td>OtherAccount<br>", html)
+        self.assertIn('select name="account"', html)
+        self.assertIn('All accounts', html)
         self.assertIn("No audit records found", self.client.get(
             "/events", query_string={"account": "' OR 1=1 --"}).get_data(as_text=True))
         self.assertIn("OtherAccount", self.client.get("/events").get_data(as_text=True))
