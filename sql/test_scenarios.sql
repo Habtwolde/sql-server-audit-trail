@@ -2,6 +2,8 @@
    Run under two distinct test logins to verify account attribution.
    Existing objects are never replaced by this script.
 */
+USE [AuditTrailTest];
+GO
 IF OBJECT_ID(N'dbo.AuditTrailProbe', N'U') IS NOT NULL
     THROW 50010, 'AuditTrailProbe exists; use a clean disposable test database.', 1;
 CREATE TABLE dbo.AuditTrailProbe (Id int PRIMARY KEY, Value nvarchar(100));

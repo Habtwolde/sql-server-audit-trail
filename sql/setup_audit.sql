@@ -1,3 +1,5 @@
+:setvar AuditDirectory "C:\SqlAudit\"
+:setvar AuditDatabase "AuditTrailTest"
 :ON ERROR EXIT
 /* DBA setup. Run in SSMS SQLCMD mode or sqlcmd with these variables:
    AuditDirectory = C:\SqlAudit\   (existing directory on the SQL Server host)
