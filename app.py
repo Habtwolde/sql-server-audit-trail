@@ -178,7 +178,7 @@ def event_table(rows):
     {% for r in rows %}<tr><td>{{ r.event_time }}</td><td>{{ r.operation }}</td>
     <td>{{ r.server_name }}<br>{{ r.database_name }}.{{ r.schema_name }}.{{ r.object_name }}</td>
     <td>{{ r.login_name }}<br>{{ r.effective_user }}</td><td>{{ r.outcome }}</td>
-    <td><details><summary>View SQL</summary><pre>{{ r.statement }}</pre></details>
+    <td style="min-width:320px"><pre>{{ r.statement or 'No SQL text supplied by source.' }}</pre>
     <a href="{{ url_for('event_detail', event_id=r.id) }}">Full record</a></td></tr>{% endfor %}</table></div>{% endif %}""", rows=rows)
 
 
@@ -202,19 +202,30 @@ def event_detail(event_id):
 @login_required
 def events():
     operation = request.args.get("operation", "")
+    account = request.args.get("account", "").strip()
+    clauses, params = [], []
+    if operation:
+        clauses.append("operation=?")
+        params.append(operation)
+    if account:
+        clauses.append("instr(lower(login_name), lower(?)) > 0")
+        params.append(account)
+    query = "SELECT * FROM audit_events"
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY event_time DESC, id DESC LIMIT 500"
     with connect() as db:
-        if operation:
-            rows = db.execute("SELECT * FROM audit_events WHERE operation=? ORDER BY event_time DESC LIMIT 500", (operation,)).fetchall()
-        else:
-            rows = db.execute("SELECT * FROM audit_events ORDER BY event_time DESC LIMIT 500").fetchall()
+        rows = db.execute(query, params).fetchall()
     body = """
     <h1>Audit trail</h1><p>Latest 500 matching records. Monthly CSV includes all collected records for the period.</p>
     <div class="card"><form method="get"><label>Operation</label><select name="operation"><option value="">All</option>
-    {% for op in operations %}<option {% if selected==op %}selected{% endif %}>{{ op }}</option>{% endfor %}</select><button>Filter</button>
+    {% for op in operations %}<option {% if selected==op %}selected{% endif %}>{{ op }}</option>{% endfor %}</select>
+    <label>Account name <input name="account" value="{{ account }}" placeholder="e.g. AuditTestB"></label>
+    <button>Filter</button>
     <a class="button" href="{{ url_for('events') }}">Clear</a></form></div>
     <div class="card">{{ table|safe }}</div>"""
     return page("Audit trail", body, operations=["INSERT","UPDATE","DELETE","MERGE","CREATE","ALTER","DROP","TRUNCATE"],
-                selected=operation, table=event_table(rows))
+                selected=operation, account=account, table=event_table(rows))
 
 
 @app.get("/reports")
