@@ -208,7 +208,7 @@ def events():
         clauses.append("operation=?")
         params.append(operation)
     if account:
-        clauses.append("instr(lower(login_name), lower(?)) > 0")
+        clauses.append("login_name = ? COLLATE NOCASE")
         params.append(account)
     query = "SELECT * FROM audit_events"
     if clauses:
@@ -216,16 +216,21 @@ def events():
     query += " ORDER BY event_time DESC, id DESC LIMIT 500"
     with connect() as db:
         rows = db.execute(query, params).fetchall()
+        accounts = [r[0] for r in db.execute(
+            "SELECT DISTINCT login_name FROM audit_events WHERE login_name IS NOT NULL AND login_name != '' ORDER BY login_name COLLATE NOCASE"
+        ).fetchall()]
     body = """
     <h1>Audit trail</h1><p>Latest 500 matching records. Monthly CSV includes all collected records for the period.</p>
     <div class="card"><form method="get"><label>Operation</label><select name="operation"><option value="">All</option>
     {% for op in operations %}<option {% if selected==op %}selected{% endif %}>{{ op }}</option>{% endfor %}</select>
-    <label>Account name <input name="account" value="{{ account }}" placeholder="e.g. AuditTestB"></label>
+    <label>Account name <select name="account"><option value="">All accounts</option>
+    {% for name in accounts %}<option value="{{ name }}" {% if account|lower == name|lower %}selected{% endif %}>{{ name }}</option>{% endfor %}
+    </select></label>
     <button>Filter</button>
     <a class="button" href="{{ url_for('events') }}">Clear</a></form></div>
     <div class="card">{{ table|safe }}</div>"""
     return page("Audit trail", body, operations=["INSERT","UPDATE","DELETE","MERGE","CREATE","ALTER","DROP","TRUNCATE"],
-                selected=operation, account=account, table=event_table(rows))
+                selected=operation, account=account, accounts=accounts, table=event_table(rows))
 
 
 @app.get("/reports")
