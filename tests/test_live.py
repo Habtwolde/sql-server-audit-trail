@@ -55,6 +55,21 @@ class LiveTests(unittest.TestCase):
         data["csrf_token"] = self.token()
         return self.client.post(path, data=data)
 
+    def test_account_filter_and_visible_sql(self):
+        ingest("test-source", record(statement="<script>visible SQL</script>"))
+        ingest("test-source", record(sequence_number=2,
+               session_server_principal_name="OtherAccount", action_id="IN  "))
+        self.login("viewer")
+        response = self.client.get("/events", query_string={"account": "ACTOR", "operation": "UPDATE"})
+        html = response.get_data(as_text=True)
+        self.assertIn("&lt;script&gt;visible SQL&lt;/script&gt;", html)
+        self.assertNotIn("<summary>View SQL</summary>", html)
+        self.assertNotIn("OtherAccount", html)
+        self.assertIn('value="ACTOR"', html)
+        self.assertIn("No audit records found", self.client.get(
+            "/events", query_string={"account": "' OR 1=1 --"}).get_data(as_text=True))
+        self.assertIn("OtherAccount", self.client.get("/events").get_data(as_text=True))
+
     def test_live_start_has_no_demo_seed(self):
         from app import initialize
         initialize()
