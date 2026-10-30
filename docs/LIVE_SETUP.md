@@ -109,7 +109,7 @@ The web port is bound to loopback. Use a deliberate HTTPS gateway/private networ
 
 ## Remaining production work
 
-Windows web SSO; separate database repository; S3 archive; efficient incremental scanning under high load; fragment assembly; gap/retention monitoring; and a verified version/edition/workload compatibility matrix. These are explicit release gates, not assumed capabilities.
+Windows web SSO; separate database repository; real S3 deployment validation; efficient incremental scanning under high load; fragment assembly; gap/retention monitoring; and a verified version/edition/workload compatibility matrix. These are explicit release gates, not assumed capabilities.
 
 ## Automatic monthly CSV reports (no Task Scheduler)
 
@@ -169,5 +169,5 @@ A report is a snapshot of records collected at generation time. A successful sca
 does not certify capture completeness. Late-arriving records for an already
 reported month require a manually generated new version and another review.
 The delay reduces boundary races but does not guarantee all records have arrived.
-S3 upload is a separate pending feature; scheduled CSVs currently use the same
-local AUDIT_REPORT_DIR as manual reports.
+Scheduled CSVs use the same local AUDIT_REPORT_DIR as manual reports.
+Optional S3 history and storage configuration are described in [Report storage](REPORT_STORAGE.md).
