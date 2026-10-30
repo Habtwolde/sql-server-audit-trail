@@ -65,8 +65,16 @@ class LiveTests(unittest.TestCase):
         self.assertIn("&lt;script&gt;visible SQL&lt;/script&gt;", html)
         self.assertNotIn("<summary>View SQL</summary>", html)
         self.assertNotIn("<td>OtherAccount<br>", html)
-        self.assertIn('select name="account"', html)
-        self.assertIn('All accounts', html)
+        self.assertIn('type="checkbox" name="account"', html)
+        self.assertNotIn('name="operation"', html)
+        self.assertIn('1 selected', html)
+        combined = self.client.get("/events", query_string=[
+            ("account", "DOMAIN\\actor"), ("account", "OtherAccount"), ("operation", "DROP")
+        ]).get_data(as_text=True)
+        self.assertIn("<td>OtherAccount<br>", combined)
+        self.assertIn("&lt;script&gt;visible SQL&lt;/script&gt;", combined)
+        self.assertIn("2 selected", combined)
+        self.assertEqual(combined.count(' checked>'), 2)
         self.assertIn("No audit records found", self.client.get(
             "/events", query_string={"account": "' OR 1=1 --"}).get_data(as_text=True))
         self.assertIn("OtherAccount", self.client.get("/events").get_data(as_text=True))
