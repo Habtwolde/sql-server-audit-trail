@@ -25,7 +25,7 @@ Live SQL Server Audit reader and web application for SQL Server **2019 and newer
 - SQL text can span multiple records. Fragments are retained with sequence/group information; automatic statement reassembly is pending. CSV counts are record counts, not unique statement counts.
 - Native auditing only records configured actions. Stored-procedure ownership chaining, dynamic SQL, MERGE/TRUNCATE, denied operations and server/database scope require explicit coverage testing. SELECT is not enabled by the supplied configuration.
 - No automatic detection of every lost/deleted audit file or unaudited operation is claimed. First import includes retained history; deleted history cannot be recovered. Audit disablement, queue/disk failures and retention require operational monitoring.
-- Monthly reports are generated manually in this build. Automatic scheduling and S3 upload are pending.
+- Monthly CSV reports support manual generation and opt-in automatic scheduling inside the collector, including catch-up and duplicate prevention. See [automatic reporting setup](docs/LIVE_SETUP.md#automatic-monthly-csv-reports-no-task-scheduler). Reports still require human review. S3 upload is pending.
 - All editions of SQL Server 2019+ are the compatibility target, not a completed test matrix. No real SQL Server instance or Windows SSO host was available during development. Docker files have not yet been built in the development environment.
 
 ## Run after configuration
