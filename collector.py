@@ -153,6 +153,13 @@ def main():
             print(detail, flush=True)
             if args.check or args.once:
                 raise SystemExit(1)
+        if not args.check:
+            from report_archive import sync_archives
+            archive = sync_archives()
+            if archive["status"] == "Error" or archive.get("uploaded"):
+                print(json.dumps({"report_archive": archive}), flush=True)
+            if archive["status"] == "Error" and args.once:
+                raise SystemExit(1)
         if args.check or args.once:
             return
         try:
