@@ -89,6 +89,7 @@ h1{font-size:25px}h2{font-size:18px}.muted{color:#64748b}.grid{display:grid;grid
 input,select,textarea{padding:9px;border:1px solid #cbd5e1;border-radius:5px;margin:4px}table{border-collapse:collapse;width:100%;font-size:13px}
 th,td{border-bottom:1px solid #e2e8f0;padding:9px;text-align:left;vertical-align:top}th{background:#f0f5fa}
 pre{white-space:pre-wrap;word-break:break-word;margin:0;max-width:520px}.pill{padding:4px 8px;border-radius:12px;background:#e8f2ff}
+.account-picker{display:inline-block;position:relative;vertical-align:middle;min-width:240px;margin:4px}.account-picker summary{cursor:pointer;padding:10px;border:1px solid #cbd5e1;border-radius:5px}.account-picker fieldset{position:absolute;z-index:2;background:white;min-width:300px;max-height:300px;overflow:auto;box-shadow:0 4px 16px #142b4620;border:1px solid #cbd5e1}
 .alert{background:#fff7db;padding:12px;border-radius:6px}.actions{display:flex;gap:8px;align-items:center}
 </style></head><body>
 <header class="top"><div><b>SQL Server Audit Trail</b><div class="muted" style="color:#c3d3e5">{{ mode_label }}</div></div>
@@ -201,18 +202,15 @@ def event_detail(event_id):
 @app.get("/events")
 @login_required
 def events():
-    operation = request.args.get("operation", "")
-    account = request.args.get("account", "").strip()
-    clauses, params = [], []
-    if operation:
-        clauses.append("operation=?")
-        params.append(operation)
-    if account:
-        clauses.append("login_name = ? COLLATE NOCASE")
-        params.append(account)
+    selected_accounts = list(dict.fromkeys(
+        value for value in request.args.getlist("account") if value
+    ))
+    selected_keys = {value.lower() for value in selected_accounts}
     query = "SELECT * FROM audit_events"
-    if clauses:
-        query += " WHERE " + " AND ".join(clauses)
+    params = selected_accounts
+    if selected_accounts:
+        placeholders = ",".join("?" for _ in selected_accounts)
+        query += " WHERE login_name COLLATE NOCASE IN (" + placeholders + ")"
     query += " ORDER BY event_time DESC, id DESC LIMIT 500"
     with connect() as db:
         rows = db.execute(query, params).fetchall()
@@ -221,16 +219,19 @@ def events():
         ).fetchall()]
     body = """
     <h1>Audit trail</h1><p>Latest 500 matching records. Monthly CSV includes all collected records for the period.</p>
-    <div class="card"><form method="get"><label>Operation</label><select name="operation"><option value="">All</option>
-    {% for op in operations %}<option {% if selected==op %}selected{% endif %}>{{ op }}</option>{% endfor %}</select>
-    <label>Account name <select name="account"><option value="">All accounts</option>
-    {% for name in accounts %}<option value="{{ name }}" {% if account|lower == name|lower %}selected{% endif %}>{{ name }}</option>{% endfor %}
-    </select></label>
+    <div class="card"><form method="get">
+    <details class="account-picker"><summary>Accounts: {{ selected_accounts|length|string + ' selected' if selected_accounts else 'All accounts' }}</summary>
+    <fieldset><legend>Select accounts</legend>
+    <p class="muted">Leave all unchecked to show all accounts.</p>
+    {% for name in accounts %}<label style="display:block;padding:4px">
+    <input type="checkbox" name="account" value="{{ name }}" {% if name|lower in selected_keys %}checked{% endif %}>{{ name }}</label>
+    {% else %}<p>No accounts collected yet.</p>{% endfor %}
+    </fieldset></details>
     <button>Filter</button>
     <a class="button" href="{{ url_for('events') }}">Clear</a></form></div>
     <div class="card">{{ table|safe }}</div>"""
-    return page("Audit trail", body, operations=["INSERT","UPDATE","DELETE","MERGE","CREATE","ALTER","DROP","TRUNCATE"],
-                selected=operation, account=account, accounts=accounts, table=event_table(rows))
+    return page("Audit trail", body, selected_accounts=selected_accounts,
+                selected_keys=selected_keys, accounts=accounts, table=event_table(rows))
 
 
 @app.get("/reports")
