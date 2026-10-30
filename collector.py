@@ -134,6 +134,13 @@ def main():
     while True:
         try:
             print(json.dumps(poll_once(check_only=args.check)), flush=True)
+            if not args.check:
+                from report_scheduler import run_due_reports
+                reporting = run_due_reports()
+                if reporting["status"] != "Disabled" and (reporting["status"] == "Error" or reporting.get("generated")):
+                    print(json.dumps({"monthly_reporting": reporting}), flush=True)
+                if reporting["status"] == "Error" and args.once:
+                    raise SystemExit(1)
         except KeyboardInterrupt:
             set_state(source, "Stopped", "Collector stopped by operator")
             return
