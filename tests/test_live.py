@@ -3,8 +3,8 @@ import io
 import os
 import tempfile
 import unittest
-from datetime import datetime
-from unittest.mock import MagicMock
+from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
 
 # Isolate tests from real source settings, persisted data, and credentials.
 _temp = tempfile.TemporaryDirectory()
@@ -37,7 +37,7 @@ class LiveTests(unittest.TestCase):
         app.config["TESTING"] = True
         self.client = app.test_client()
         with connect() as db:
-            for table in ("report_reviews", "reports", "source_records", "source_files", "audit_events", "collector_state", "app_users"):
+            for table in ("scheduled_reports", "report_scheduler_state", "report_reviews", "reports", "source_records", "source_files", "audit_events", "collector_state", "app_users"):
                 db.execute("DELETE FROM " + table)
             for name, role in (("viewer", "Viewer"), ("reviewer", "Reviewer"), ("approver", "Approver")):
                 db.execute("INSERT INTO app_users VALUES(?,?,?)", (name, generate_password_hash("test-password-123"), role))
@@ -146,6 +146,113 @@ class LiveTests(unittest.TestCase):
         self.assertEqual(self.post(url, decision="Rejected").status_code, 409)
         with connect() as db:
             self.assertEqual(db.execute("SELECT reviewer FROM report_reviews").fetchone()[0], "approver")
+
+    def reporting_env(self, **changes):
+        values = {"REPORT_SCHEDULE_ENABLED": "true",
+                  "REPORT_SCHEDULE_START_MONTH": "2026-10",
+                  "REPORT_SCHEDULE_DELAY_HOURS": "1"}
+        values.update(changes)
+        return patch.dict(os.environ, values)
+
+    def test_scheduled_month_boundary_and_restart_idempotence(self):
+        from report_scheduler import run_due_reports, due_periods
+        from reporting import SCHEDULE_ACTOR
+        from pathlib import Path
+        import hashlib
+        ingest("test-source", record())
+        ingest("test-source", record(event_time=datetime(2026, 11, 1), sequence_group_id=b"nov"))
+        with self.reporting_env():
+            self.assertEqual(due_periods(datetime(2026, 11, 1, 0, 59, tzinfo=timezone.utc)), [])
+            now = datetime(2026, 11, 1, 1, tzinfo=timezone.utc)
+            result = run_due_reports(now)
+            self.assertEqual(len(result["generated"]), 1)
+            self.assertEqual(run_due_reports(now)["generated"], [])
+        with connect() as db:
+            report = db.execute("SELECT * FROM reports").fetchone()
+            self.assertEqual(report["created_by"], SCHEDULE_ACTOR)
+            self.assertEqual(report["event_count"], 1)
+            self.assertEqual(report["status"], "Pending")
+            self.assertEqual(db.execute("SELECT count(*) FROM scheduled_reports").fetchone()[0], 1)
+        data = Path(report["file_path"]).read_bytes()
+        self.assertEqual(hashlib.sha256(data).hexdigest(), report["sha256"])
+        self.assertEqual(len(list(csv.reader(io.StringIO(data.decode("utf-8-sig"))))), 2)
+        self.login("approver")
+        page = self.client.get("/reports")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("Automatic monthly reporting", page.get_data(as_text=True))
+        self.assertIn(SCHEDULE_ACTOR, page.get_data(as_text=True))
+        self.assertEqual(self.post(f"/reports/{report['id']}/decision", decision="Approved").status_code, 302)
+
+    def test_scheduled_catchup_empty_month_and_manual_version(self):
+        from report_scheduler import run_due_reports
+        from reporting import generate_monthly_report
+        manual = generate_monthly_report("2026-10", "reviewer")
+        with self.reporting_env():
+            result = run_due_reports(datetime(2027, 1, 1, 1, tzinfo=timezone.utc))
+        self.assertEqual([r["period"] for r in result["generated"]], ["2026-10", "2026-11", "2026-12"])
+        self.assertEqual(result["generated"][0]["version"], 2)
+        self.assertTrue(all(r["records"] == 0 for r in result["generated"]))
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT status FROM reports WHERE id=?", (manual["report_id"],)).fetchone()[0], "Pending")
+
+    def test_scheduled_failure_rolls_back_and_retries(self):
+        from report_scheduler import run_due_reports
+        from storage import REPORT_DIR
+        now = datetime(2026, 11, 1, 1, tzinfo=timezone.utc)
+        before = set(REPORT_DIR.iterdir())
+        with self.reporting_env(), patch("reporting.os.replace", side_effect=OSError("private path")):
+            result = run_due_reports(now)
+        self.assertEqual(result["status"], "Error")
+        self.assertNotIn("private path", result["detail"])
+        self.assertEqual(set(REPORT_DIR.iterdir()), before)
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM scheduled_reports").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT count(*) FROM reports").fetchone()[0], 0)
+        with self.reporting_env():
+            self.assertEqual(len(run_due_reports(now)["generated"]), 1)
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT status FROM report_scheduler_state").fetchone()[0], "Ready")
+
+    def test_scheduled_disabled_and_invalid_config(self):
+        from report_scheduler import run_due_reports
+        now = datetime(2026, 11, 1, 1, tzinfo=timezone.utc)
+        with self.reporting_env(REPORT_SCHEDULE_ENABLED="false"):
+            self.assertEqual(run_due_reports(now)["status"], "Disabled")
+        with self.reporting_env(REPORT_SCHEDULE_START_MONTH=""):
+            self.assertEqual(run_due_reports(now)["status"], "Error")
+        with self.reporting_env(REPORT_SCHEDULE_DELAY_HOURS="-1"):
+            self.assertEqual(run_due_reports(now)["status"], "Error")
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM reports").fetchone()[0], 0)
+
+    def test_scheduled_concurrent_workers_generate_only_once(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from reporting import generate_monthly_report, SCHEDULE_ACTOR
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: generate_monthly_report(
+                "2026-10", SCHEDULE_ACTOR, scheduled=True), range(2)))
+        self.assertEqual(sum(r["created"] for r in results), 1)
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM reports").fetchone()[0], 1)
+
+    def test_reporting_leap_year_and_open_month_excluded(self):
+        from report_scheduler import due_periods
+        with self.reporting_env(REPORT_SCHEDULE_START_MONTH="2028-02"):
+            self.assertEqual(due_periods(datetime(2028, 2, 29, 23, tzinfo=timezone.utc)), [])
+            self.assertEqual(due_periods(datetime(2028, 3, 1, 1, tzinfo=timezone.utc)), ["2028-02"])
+
+    def test_collector_only_schedules_after_successful_full_scan(self):
+        from collector import main
+        with patch("sys.argv", ["collector.py", "--check"]), patch("collector.poll_once", return_value={}), patch("report_scheduler.run_due_reports") as scheduled, patch("builtins.print"):
+            main()
+            scheduled.assert_not_called()
+        with patch("sys.argv", ["collector.py", "--once"]), patch("collector.poll_once", side_effect=ValueError("scan failed")), patch("report_scheduler.run_due_reports") as scheduled, patch("builtins.print"):
+            with self.assertRaises(SystemExit):
+                main()
+            scheduled.assert_not_called()
+        with patch("sys.argv", ["collector.py", "--once"]), patch("collector.poll_once", return_value={}), patch("report_scheduler.run_due_reports", return_value={"status": "Ready", "generated": []}) as scheduled, patch("builtins.print"):
+            main()
+            scheduled.assert_called_once()
 
     def fake_sql(self, major=15):
         sql = MagicMock()
