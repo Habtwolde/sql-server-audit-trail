@@ -12,7 +12,7 @@ os.environ.update(AUDIT_MODE="live", AUDIT_INSTANCE_DIR=_temp.name,
                   AUDIT_DB_PATH=os.path.join(_temp.name, "test.sqlite3"),
                   AUDIT_REPORT_DIR=os.path.join(_temp.name, "reports"),
                   FLASK_SECRET_KEY="test-secret-" * 8,
-                  SQL_SOURCE_ID="test-source", SQL_CONNECTION_STRING="test-only",
+                  REPORT_ARCHIVE_BACKEND="local", SQL_SOURCE_ID="test-source", SQL_CONNECTION_STRING="test-only",
                   SQL_AUDIT_FILE_PATTERN="test-only*.sqlaudit")
 from app import app
 from collector import ingest, poll_once
@@ -37,7 +37,7 @@ class LiveTests(unittest.TestCase):
         app.config["TESTING"] = True
         self.client = app.test_client()
         with connect() as db:
-            for table in ("scheduled_reports", "report_scheduler_state", "report_reviews", "reports", "source_records", "source_files", "audit_events", "collector_state", "app_users"):
+            for table in ("report_archives", "report_archive_state", "scheduled_reports", "report_scheduler_state", "report_reviews", "reports", "source_records", "source_files", "audit_events", "collector_state", "app_users"):
                 db.execute("DELETE FROM " + table)
             for name, role in (("viewer", "Viewer"), ("reviewer", "Reviewer"), ("approver", "Approver")):
                 db.execute("INSERT INTO app_users VALUES(?,?,?)", (name, generate_password_hash("test-password-123"), role))
@@ -253,6 +253,146 @@ class LiveTests(unittest.TestCase):
         with patch("sys.argv", ["collector.py", "--once"]), patch("collector.poll_once", return_value={}), patch("report_scheduler.run_due_reports", return_value={"status": "Ready", "generated": []}) as scheduled, patch("builtins.print"):
             main()
             scheduled.assert_called_once()
+
+    def archive_env(self, **changes):
+        values = {"REPORT_ARCHIVE_BACKEND": "s3", "REPORT_S3_BUCKET": "audit-test-bucket",
+                  "REPORT_S3_PREFIX": "pilot", "REPORT_S3_ENCRYPTION": "AES256"}
+        values.update(changes)
+        return patch.dict(os.environ, values)
+
+    def new_report(self):
+        from reporting import generate_monthly_report
+        result = generate_monthly_report("2026-10", "reviewer")
+        with connect() as db:
+            return db.execute("SELECT * FROM reports WHERE id=?", (result["report_id"],)).fetchone()
+
+    def test_s3_history_upload_checksum_encryption_and_no_duplicate(self):
+        from report_archive import sync_archives
+        import base64
+        report = self.new_report()
+        client = MagicMock()
+        client.put_object.return_value = {"VersionId": "version-one"}
+        with self.archive_env():
+            self.assertEqual(sync_archives(client)["uploaded"], 1)
+            self.assertEqual(sync_archives(client)["uploaded"], 0)
+        client.put_object.assert_called_once()
+        args = client.put_object.call_args.kwargs
+        self.assertEqual(args["Bucket"], "audit-test-bucket")
+        self.assertEqual(args["IfNoneMatch"], "*")
+        self.assertEqual(args["ServerSideEncryption"], "AES256")
+        self.assertEqual(args["ChecksumSHA256"], base64.b64encode(bytes.fromhex(report["sha256"])).decode())
+        self.assertTrue(args["Key"].startswith("pilot/live/2026/10/"))
+        self.assertEqual(args["Body"], __import__("pathlib").Path(report["file_path"]).read_bytes())
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT status FROM reports").fetchone()[0], "Pending")
+            self.assertEqual(db.execute("SELECT version_id FROM report_archives").fetchone()[0], "version-one")
+
+    def test_s3_failure_retries_original_destination_without_losing_local_report(self):
+        from report_archive import sync_archives
+        from pathlib import Path
+        report = self.new_report()
+        client = MagicMock()
+        client.put_object.side_effect = OSError("private credentials")
+        with self.archive_env():
+            self.assertEqual(sync_archives(client)["failed"], 1)
+        self.assertTrue(Path(report["file_path"]).is_file())
+        client.put_object.side_effect = None
+        client.put_object.return_value = {}
+        with self.archive_env(REPORT_S3_BUCKET="new-bucket"):
+            self.assertEqual(sync_archives(client)["uploaded"], 1)
+        self.assertEqual(client.put_object.call_args.kwargs["Bucket"], "audit-test-bucket")
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT error FROM report_archives").fetchone()[0], "")
+
+    def test_s3_existing_object_is_verified_after_uncertain_upload(self):
+        from report_archive import sync_archives
+        from pathlib import Path
+        report = self.new_report()
+        error = RuntimeError("already exists")
+        error.response = {"Error": {"Code": "PreconditionFailed"}}
+        client = MagicMock()
+        client.put_object.side_effect = error
+        client.get_object.return_value = {"Body": io.BytesIO(Path(report["file_path"]).read_bytes()),
+                                          "VersionId": "existing-version"}
+        with self.archive_env():
+            self.assertEqual(sync_archives(client)["uploaded"], 1)
+        client.get_object.assert_called_once()
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT version_id FROM report_archives").fetchone()[0], "existing-version")
+
+    def test_s3_conflicting_remote_bytes_are_not_accepted(self):
+        from report_archive import sync_archives
+        self.new_report()
+        error = RuntimeError("already exists")
+        error.response = {"Error": {"Code": "412"}}
+        client = MagicMock()
+        client.put_object.side_effect = error
+        client.get_object.return_value = {"Body": io.BytesIO(b"wrong csv")}
+        with self.archive_env():
+            self.assertEqual(sync_archives(client)["failed"], 1)
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT status FROM report_archives").fetchone()[0], "Error")
+
+    def test_s3_local_corruption_is_rejected_before_upload_and_download(self):
+        from report_archive import sync_archives
+        from pathlib import Path
+        report = self.new_report()
+        Path(report["file_path"]).write_bytes(b"modified report")
+        client = MagicMock()
+        with self.archive_env():
+            self.assertEqual(sync_archives(client)["failed"], 1)
+        client.put_object.assert_not_called()
+        self.login("viewer")
+        response = self.client.get(f"/reports/{report['id']}/download")
+        self.assertEqual(response.status_code, 503)
+
+    def test_missing_local_csv_can_download_verified_s3_version(self):
+        from report_archive import sync_archives
+        from pathlib import Path
+        report = self.new_report()
+        data = Path(report["file_path"]).read_bytes()
+        client = MagicMock()
+        client.put_object.return_value = {"VersionId": "pinned-version"}
+        with self.archive_env():
+            sync_archives(client)
+        Path(report["file_path"]).unlink()
+        client.get_object.return_value = {"Body": io.BytesIO(data)}
+        self.login("viewer")
+        with patch("report_archive.s3_client", return_value=client):
+            response = self.client.get(f"/reports/{report['id']}/download")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_data(), data)
+        response.close()
+        self.assertEqual(client.get_object.call_args.kwargs["VersionId"], "pinned-version")
+
+    def test_archive_local_mode_and_config_validation(self):
+        from report_archive import sync_archives
+        self.new_report()
+        client = MagicMock()
+        with patch.dict(os.environ, {"REPORT_ARCHIVE_BACKEND": "local"}):
+            self.assertEqual(sync_archives(client)["status"], "Local")
+        client.put_object.assert_not_called()
+        with self.archive_env(REPORT_S3_BUCKET=""):
+            self.assertEqual(sync_archives(client)["status"], "Error")
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM report_archives").fetchone()[0], 0)
+
+    def test_s3_request_matches_official_sdk_model(self):
+        import boto3
+        from botocore.stub import Stubber, ANY
+        from report_archive import sync_archives
+        self.new_report()
+        client = boto3.client("s3", region_name="us-east-1",
+                              aws_access_key_id="test", aws_secret_access_key="test")
+        with Stubber(client) as stub:
+            stub.add_response("put_object", {"VersionId": "one"},
+                              {"Bucket": "audit-test-bucket", "Key": ANY, "Body": ANY,
+                               "ContentType": "text/csv; charset=utf-8", "IfNoneMatch": "*",
+                               "ChecksumSHA256": ANY, "ServerSideEncryption": "AES256",
+                               "Metadata": ANY})
+            with self.archive_env():
+                self.assertEqual(sync_archives(client)["uploaded"], 1)
+            stub.assert_no_pending_responses()
 
     def fake_sql(self, major=15):
         sql = MagicMock()
