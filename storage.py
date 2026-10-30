@@ -55,6 +55,14 @@ CREATE TABLE IF NOT EXISTS reports (
     status TEXT NOT NULL DEFAULT 'Pending',
     UNIQUE(period, version)
 );
+CREATE TABLE IF NOT EXISTS scheduled_reports (
+    period TEXT PRIMARY KEY,
+    report_id INTEGER NOT NULL UNIQUE REFERENCES reports(id)
+);
+CREATE TABLE IF NOT EXISTS report_scheduler_state (
+    id INTEGER PRIMARY KEY CHECK(id=1), status TEXT NOT NULL,
+    last_attempt TEXT NOT NULL, last_success TEXT, detail TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS report_reviews (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     report_id INTEGER NOT NULL REFERENCES reports(id),
