@@ -109,4 +109,65 @@ The web port is bound to loopback. Use a deliberate HTTPS gateway/private networ
 
 ## Remaining production work
 
-Windows web SSO; separate database repository; automatic monthly scheduling and S3 archive; efficient incremental scanning under high load; fragment assembly; gap/retention monitoring; and a verified version/edition/workload compatibility matrix. These are explicit release gates, not assumed capabilities.
+Windows web SSO; separate database repository; S3 archive; efficient incremental scanning under high load; fragment assembly; gap/retention monitoring; and a verified version/edition/workload compatibility matrix. These are explicit release gates, not assumed capabilities.
+
+## Automatic monthly CSV reports (no Task Scheduler)
+
+Automatic reporting is opt-in. Add these entries to your private .env:
+
+```dotenv
+REPORT_SCHEDULE_ENABLED=true
+REPORT_SCHEDULE_START_MONTH=2026-10
+REPORT_SCHEDULE_DELAY_HOURS=1
+```
+
+Choose the first calendar month that should receive an automatic report.
+With this example, October is due on November 1 at 01:00 UTC (04:00 Ethiopia).
+Months use UTC boundaries, matching the current CSV report convention. The
+delay is configurable from 0 through 168 hours.
+
+After pulling the new code, restart the web app and collector. The existing
+SQLite database is upgraded by creating new scheduling tables; existing audit
+records, reports and review decisions remain available.
+
+```powershell
+python report_scheduler.py --status
+python collector.py
+```
+
+--status displays enabled/start/delay/due months and does not connect to SQL
+Server or generate a report. The continuous collector checks for due reports
+after every successful full audit-file scan. --check never generates reports;
+collector.py --once also processes due reports when enabled. To explicitly
+collect once and process all due reports:
+
+```powershell
+python report_scheduler.py --run-due
+```
+
+A running collector is required. The web server alone does not execute the
+schedule. No additional scheduled task or scheduler process is needed. Process
+startup/restart remains the hosting platform's responsibility.
+
+Closed months are processed oldest first, including missed months after downtime.
+One scheduled report per calendar month is recorded transactionally in SQLite,
+so restarts or concurrent calls do not create duplicate scheduled versions.
+Manually generated reports do not suppress the automatic report; both use the
+existing version numbering. Empty months receive a zero-record CSV so that a
+missing report cannot be mistaken for an empty month.
+
+Reports are created by system:monthly-scheduler with Pending status. A permitted
+human reviewer must approve or reject them in Reports. Automatic reporting does
+not approve reports or overwrite earlier versions. CSV columns, raw SQL evidence,
+spreadsheet escaping and SHA-256 checksums are preserved. File publication
+failures roll back the report and scheduled-period marker and retry after the next
+successful collection scan. Check Reports > Automatic monthly reporting for
+the last reporting attempt and any error. When the collector is stopped, its last
+status remains historical; inspect the timestamp.
+
+A report is a snapshot of records collected at generation time. A successful scan
+does not certify capture completeness. Late-arriving records for an already
+reported month require a manually generated new version and another review.
+The delay reduces boundary races but does not guarantee all records have arrived.
+S3 upload is a separate pending feature; scheduled CSVs currently use the same
+local AUDIT_REPORT_DIR as manual reports.
