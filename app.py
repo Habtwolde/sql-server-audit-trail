@@ -1,11 +1,12 @@
 import os
+import io
 from datetime import datetime, timezone
 from pathlib import Path
 from functools import wraps
 
 from flask import Flask, abort, redirect, render_template_string, request, send_file, session, url_for
 
-from storage import MODE, connect, initialize_store
+from storage import MODE, REPORT_DIR, connect, initialize_store
 from reporting import generate_monthly_report
 from security import configure_security
 
@@ -236,10 +237,14 @@ def events():
 @login_required
 def reports():
     with connect() as db:
-        rows = db.execute("SELECT * FROM reports ORDER BY created_at DESC").fetchall()
+        rows = db.execute("SELECT r.*,a.status AS archive_status,a.error AS archive_error,"
+                          "a.bucket AS archive_bucket,a.object_key AS archive_key "
+                          "FROM reports r LEFT JOIN report_archives a ON a.report_id=r.id "
+                          "ORDER BY r.created_at DESC").fetchall()
         reviews = db.execute("SELECT * FROM report_reviews ORDER BY decided_at DESC").fetchall()
     with connect() as db:
         schedule_state = db.execute("SELECT * FROM report_scheduler_state WHERE id=1").fetchone()
+        archive_state = db.execute("SELECT * FROM report_archive_state WHERE id=1").fetchone()
     schedule_enabled = os.environ.get("REPORT_SCHEDULE_ENABLED", "false").lower() == "true"
     body = """
     <h1>Monthly reports</h1>
@@ -250,12 +255,19 @@ def reports():
     {% if schedule_state %}<p>Status: {{ schedule_state.status }} · Last attempt (UTC): {{ schedule_state.last_attempt }}
     <br>Last successful reporting check (UTC): {{ schedule_state.last_success or 'Never' }}<br>{{ schedule_state.detail }}</p>{% endif %}
     <p>Scheduled reports await human approval. Reports are snapshots; records collected later require a new report version.</p></div>
+    <div class="card"><h2>Report storage</h2>
+    <p>Local CSV history: {{ report_directory }}<br>S3 archiving: {{ archive_backend }}</p>
+    {% if archive_state %}<p>{{ archive_state.status }} · Last attempt (UTC): {{ archive_state.last_attempt }}<br>{{ archive_state.detail }}</p>{% endif %}
+    <p>Local copies are retained. S3 archiving runs in the collector and includes existing report versions.</p></div>
     <p class="alert">Reports contain collected audit records only. Capture coverage is not yet certified. Long SQL may span multiple records; approval does not certify capture completeness.</p><div class="card"><h2>Generate CSV</h2>
     <form method="post" action="{{ url_for('generate_report') }}"><label>Month</label>
     <input type="month" name="period" required value="{{ current_month }}">
     <button>Generate report</button></form><p class="muted">Each generation creates a new version and records its SHA-256 digest.</p></div>
-    <div class="card"><h2>Report history</h2>{% if rows %}<table><tr><th>Period</th><th>Version</th><th>Created</th><th>Records</th><th>Status</th><th>Digest</th><th>Actions</th></tr>
-    {% for r in rows %}<tr><td>{{ r.period }}</td><td>v{{ r.version }}</td><td>{{ r.created_at }}<br>by {{ r.created_by }}</td><td>{{ r.event_count }}</td><td>{{ r.status }}</td><td><code>{{ r.sha256[:14] }}…</code></td><td><a href="{{ url_for('download_report', report_id=r.id) }}">CSV</a>
+    <div class="card"><h2>Report history</h2>{% if rows %}<table><tr><th>Period</th><th>Version</th><th>Created</th><th>Records</th><th>Status</th><th>Digest</th><th>Archive</th><th>Actions</th></tr>
+    {% for r in rows %}<tr><td>{{ r.period }}</td><td>v{{ r.version }}</td><td>{{ r.created_at }}<br>by {{ r.created_by }}</td><td>{{ r.event_count }}</td><td>{{ r.status }}</td><td><code>{{ r.sha256[:14] }}…</code></td>
+    <td>{{ r.archive_status or ('Waiting for collector' if archive_backend == 's3' else 'Local') }}
+    {% if r.archive_error %}<br>{{ r.archive_error }}{% endif %}
+    {% if r.archive_status == 'Uploaded' %}<br><small>s3://{{ r.archive_bucket }}/{{ r.archive_key }}</small>{% endif %}</td><td><a href="{{ url_for('download_report', report_id=r.id) }}">CSV</a>
     {% if r.status=='Pending' and r.created_by != user and role in ['Reviewer','Approver','Administrator'] %}<form class="actions" method="post" action="{{ url_for('decide_report', report_id=r.id) }}">
     <input name="comment" placeholder="Optional comment"><button name="decision" value="Approved">Approve</button><button name="decision" value="Rejected">Reject</button></form>{% endif %}</td></tr>{% endfor %}</table>
     {% else %}<p class="muted">No reports generated yet.</p>{% endif %}</div>
@@ -264,7 +276,9 @@ def reports():
     return page("Reports", body, rows=rows, reviews=reviews, role=session["role"], user=session["user"], current_month=datetime.now(timezone.utc).strftime("%Y-%m"),
                 schedule_enabled=schedule_enabled, schedule_state=schedule_state,
                 schedule_start=os.environ.get("REPORT_SCHEDULE_START_MONTH", "Not configured"),
-                schedule_delay=os.environ.get("REPORT_SCHEDULE_DELAY_HOURS", "1"))
+                schedule_delay=os.environ.get("REPORT_SCHEDULE_DELAY_HOURS", "1"),
+                archive_state=archive_state, archive_backend=os.environ.get("REPORT_ARCHIVE_BACKEND", "local").lower(),
+                report_directory=str(REPORT_DIR))
 
 
 @app.post("/reports/generate")
@@ -285,9 +299,18 @@ def generate_report():
 def download_report(report_id):
     with connect() as db:
         report = db.execute("SELECT * FROM reports WHERE id=?", (report_id,)).fetchone()
-    if not report or not Path(report["file_path"]).is_file():
+    if not report:
         abort(404)
-    return send_file(report["file_path"], as_attachment=True, download_name=Path(report["file_path"]).name, mimetype="text/csv")
+    from report_archive import report_bytes
+    try:
+        data = report_bytes(report)
+    except FileNotFoundError:
+        abort(404)
+    except Exception:
+        return page("Report unavailable", "<div class='card'><h1>Report unavailable</h1><p>Unable to retrieve a verified CSV. Check report storage, archive access and checksum.</p></div>"), 503
+    return send_file(io.BytesIO(data), as_attachment=True,
+                     download_name=Path(report["file_path"]).name, mimetype="text/csv")
+
 
 
 @app.post("/reports/<int:report_id>/decision")
