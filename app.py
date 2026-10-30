@@ -1,6 +1,3 @@
-import csv
-import hashlib
-import io
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -8,7 +5,8 @@ from functools import wraps
 
 from flask import Flask, abort, redirect, render_template_string, request, send_file, session, url_for
 
-from storage import MODE, BASE_DIR, INSTANCE_DIR, REPORT_DIR, DB_PATH, connect, initialize_store
+from storage import MODE, connect, initialize_store
+from reporting import generate_monthly_report
 from security import configure_security
 
 app = Flask(__name__)
@@ -240,8 +238,19 @@ def reports():
     with connect() as db:
         rows = db.execute("SELECT * FROM reports ORDER BY created_at DESC").fetchall()
         reviews = db.execute("SELECT * FROM report_reviews ORDER BY decided_at DESC").fetchall()
+    with connect() as db:
+        schedule_state = db.execute("SELECT * FROM report_scheduler_state WHERE id=1").fetchone()
+    schedule_enabled = os.environ.get("REPORT_SCHEDULE_ENABLED", "false").lower() == "true"
     body = """
-    <h1>Monthly reports</h1><p class="alert">Reports contain collected audit records only. Capture coverage is not yet certified. Long SQL may span multiple records; approval does not certify capture completeness.</p><div class="card"><h2>Generate CSV</h2>
+    <h1>Monthly reports</h1>
+    <div class="card"><h2>Automatic monthly reporting</h2>
+    <p>{{ 'Enabled' if schedule_enabled else 'Disabled' }} · Calendar months in UTC.
+    {% if schedule_enabled %}First month: {{ schedule_start }} · Delay after month end: {{ schedule_delay }} hour(s).
+    Requires the collector to be running and a successful full scan.{% endif %}</p>
+    {% if schedule_state %}<p>Status: {{ schedule_state.status }} · Last attempt (UTC): {{ schedule_state.last_attempt }}
+    <br>Last successful reporting check (UTC): {{ schedule_state.last_success or 'Never' }}<br>{{ schedule_state.detail }}</p>{% endif %}
+    <p>Scheduled reports await human approval. Reports are snapshots; records collected later require a new report version.</p></div>
+    <p class="alert">Reports contain collected audit records only. Capture coverage is not yet certified. Long SQL may span multiple records; approval does not certify capture completeness.</p><div class="card"><h2>Generate CSV</h2>
     <form method="post" action="{{ url_for('generate_report') }}"><label>Month</label>
     <input type="month" name="period" required value="{{ current_month }}">
     <button>Generate report</button></form><p class="muted">Each generation creates a new version and records its SHA-256 digest.</p></div>
@@ -252,43 +261,22 @@ def reports():
     {% else %}<p class="muted">No reports generated yet.</p>{% endif %}</div>
     <div class="card"><h2>Decision history</h2><table><tr><th>Report ID</th><th>User</th><th>Decision</th><th>When (UTC)</th><th>Comment</th></tr>
     {% for item in reviews %}<tr><td>{{ item.report_id }}</td><td>{{ item.reviewer }}</td><td>{{ item.decision }}</td><td>{{ item.decided_at }}</td><td>{{ item.comment }}</td></tr>{% endfor %}</table></div>"""
-    return page("Reports", body, rows=rows, reviews=reviews, role=session["role"], user=session["user"], current_month=datetime.now(timezone.utc).strftime("%Y-%m"))
+    return page("Reports", body, rows=rows, reviews=reviews, role=session["role"], user=session["user"], current_month=datetime.now(timezone.utc).strftime("%Y-%m"),
+                schedule_enabled=schedule_enabled, schedule_state=schedule_state,
+                schedule_start=os.environ.get("REPORT_SCHEDULE_START_MONTH", "Not configured"),
+                schedule_delay=os.environ.get("REPORT_SCHEDULE_DELAY_HOURS", "1"))
 
 
 @app.post("/reports/generate")
 @roles_required("Reviewer", "Approver", "Administrator")
 def generate_report():
     period = request.form.get("period", "")
+    from reporting import month_bounds
     try:
-        start = datetime.strptime(period, "%Y-%m")
-        if start.strftime("%Y-%m") != period or start.year >= 9999:
-            raise ValueError("Invalid month")
+        month_bounds(period)
     except ValueError:
         abort(400)
-    end = datetime(start.year + (start.month == 12), 1 if start.month == 12 else start.month + 1, 1)
-    start_iso = start.isoformat()
-    end_iso = end.isoformat()
-    with connect() as db:
-        db.execute("BEGIN IMMEDIATE")
-        rows = db.execute("SELECT * FROM audit_events WHERE event_time >= ? AND event_time < ? ORDER BY event_time",
-                           (start_iso, end_iso)).fetchall()
-        version = db.execute("SELECT COALESCE(MAX(version),0)+1 FROM reports WHERE period=?", (period,)).fetchone()[0]
-        report_id = db.execute("INSERT INTO reports(period,version,created_at,created_by,event_count,file_path,sha256,status) VALUES(?,?,?,?,?,?,?,?)",
-                               (period, version, datetime.now(timezone.utc).isoformat(), session["user"],
-                                len(rows), "", "", "Pending")).lastrowid
-        output = io.StringIO(newline="")
-        writer = csv.writer(output)
-        writer.writerow(["Event ID","Event Time UTC","Server","Database","Login","Effective User","Application","Client Host","Schema","Object","Operation","Outcome","SQL Statement","Source ID","Audit File","File Offset","Sequence Number","Sequence Group","Action ID","Collected At UTC"])
-        for row in rows:
-            source = db.execute("SELECT * FROM source_records WHERE event_id=?", (row["id"],)).fetchone()
-            from security import csv_cell
-            writer.writerow([csv_cell(row[k]) for k in ("id","event_time","server_name","database_name","login_name","effective_user","application_name","client_host","schema_name","object_name","operation","outcome","statement")] + [csv_cell(source[k]) if source else "" for k in ("source_id","file_name","file_offset","sequence_number","sequence_group_id","action_id","collected_at")])
-        filename = f"audit-{period}-v{version:03}.csv"
-        file_path = REPORT_DIR / filename
-        data = output.getvalue().encode("utf-8-sig")
-        file_path.write_bytes(data)
-        digest = hashlib.sha256(data).hexdigest()
-        db.execute("UPDATE reports SET file_path=?,sha256=? WHERE id=?", (str(file_path), digest, report_id))
+    generate_monthly_report(period, session["user"])
     return redirect(url_for("reports"))
 
 
