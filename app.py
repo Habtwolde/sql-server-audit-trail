@@ -192,10 +192,10 @@ def event_detail(event_id):
         abort(404)
     return page("Audit evidence", """<h1>Audit record {{ row.id }}</h1><div class="card">
     {% for key in row.keys() %}<p><b>{{ key }}</b>: <span style="white-space:pre-wrap">{{ row[key] }}</span></p>{% endfor %}</div>
-    {% if source %}<div class="card"><h2>Source evidence</h2>
-    <p>File: {{ source.file_name }} · offset: {{ source.file_offset }} · sequence: {{ source.sequence_number }} · group: {{ source.sequence_group_id }}</p>
+    {% if evidence %}<div class="card"><h2>Source evidence</h2>
+    <p>File: {{ evidence.file_name }} · offset: {{ evidence.file_offset }} · sequence: {{ evidence.sequence_number }} · group: {{ evidence.sequence_group_id }}</p>
     <p>SQL text may be one fragment of a larger record. All available fragments are retained separately; sequence metadata is included in CSV.</p>
-    <pre>{{ source.raw_json }}</pre></div>{% endif %}""", row=row, source=source)
+    <pre>{{ evidence.raw_json }}</pre></div>{% endif %}""", row=row, evidence=source)
 
 
 @app.get("/events")
