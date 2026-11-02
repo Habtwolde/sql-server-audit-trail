@@ -79,6 +79,19 @@ class LiveTests(unittest.TestCase):
             "/events", query_string={"account": "' OR 1=1 --"}).get_data(as_text=True))
         self.assertIn("OtherAccount", self.client.get("/events").get_data(as_text=True))
 
+    def test_full_record_renders_source_evidence(self):
+        ingest("test-source", record(statement="<script>test</script>"))
+        self.login("viewer")
+        with connect() as db:
+            event_id = db.execute("SELECT id FROM audit_events").fetchone()[0]
+        response = self.client.get(f"/events/{event_id}")
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("audit-file.sqlaudit", html)
+        self.assertIn("&lt;script&gt;test&lt;/script&gt;", html)
+        self.assertNotIn("<script>test</script>", html)
+        self.assertEqual(self.client.get("/events/999999").status_code, 404)
+
     def test_live_start_has_no_demo_seed(self):
         from app import initialize
         initialize()
