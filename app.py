@@ -88,6 +88,10 @@ h1{font-size:25px}h2{font-size:18px}.muted{color:#64748b}.grid{display:grid;grid
 input,select,textarea{padding:9px;border:1px solid #cbd5e1;border-radius:5px;margin:4px}table{border-collapse:collapse;width:100%;font-size:13px}
 th,td{border-bottom:1px solid #e2e8f0;padding:9px;text-align:left;vertical-align:top}th{background:#f0f5fa}
 pre{white-space:pre-wrap;word-break:break-word;margin:0;max-width:520px}.pill{padding:4px 8px;border-radius:12px;background:#e8f2ff}
+.record-details{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px 24px;margin:0}.record-details div{min-width:0}.record-details dt{font-weight:600;color:#64748b;font-size:13px;margin-bottom:5px}.record-details dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
+pre.code-box{box-sizing:border-box;width:100%;max-width:100%;max-height:360px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;padding:14px;background:#f4f7fb;border:1px solid #dce4ee;border-radius:6px;line-height:1.5}
+pre.sql-preview{max-height:160px;margin-bottom:8px}.evidence-meta{overflow-wrap:anywhere}.raw-evidence summary{cursor:pointer;font-weight:600;padding:12px 0}.record-card{min-width:0}
+@media(max-width:650px){.record-details{grid-template-columns:1fr}.top{flex-wrap:wrap;gap:12px}}
 .account-picker{display:inline-block;position:relative;vertical-align:middle;min-width:240px;margin:4px}.account-picker summary{cursor:pointer;padding:10px;border:1px solid #cbd5e1;border-radius:5px}.account-picker fieldset{position:absolute;z-index:2;background:white;min-width:300px;max-height:300px;overflow:auto;box-shadow:0 4px 16px #142b4620;border:1px solid #cbd5e1}
 .alert{background:#fff7db;padding:12px;border-radius:6px}.actions{display:flex;gap:8px;align-items:center}
 </style></head><body>
@@ -178,7 +182,7 @@ def event_table(rows):
     {% for r in rows %}<tr><td>{{ r.event_time }}</td><td>{{ r.operation }}</td>
     <td>{{ r.server_name }}<br>{{ r.database_name }}.{{ r.schema_name }}.{{ r.object_name }}</td>
     <td>{{ r.login_name }}<br>{{ r.effective_user }}</td><td>{{ r.outcome }}</td>
-    <td style="min-width:320px"><pre>{{ r.statement or 'No SQL text supplied by source.' }}</pre>
+    <td style="min-width:320px"><pre class="code-box sql-preview" tabindex="0" aria-label="SQL statement">{{ r.statement or 'No SQL text supplied by source.' }}</pre>
     <a href="{{ url_for('event_detail', event_id=r.id) }}">Full record</a></td></tr>{% endfor %}</table></div>{% endif %}""", rows=rows)
 
 
@@ -190,12 +194,23 @@ def event_detail(event_id):
         source = db.execute("SELECT * FROM source_records WHERE event_id=?", (event_id,)).fetchone()
     if not row:
         abort(404)
-    return page("Audit evidence", """<h1>Audit record {{ row.id }}</h1><div class="card">
-    {% for key in row.keys() %}<p><b>{{ key }}</b>: <span style="white-space:pre-wrap">{{ row[key] }}</span></p>{% endfor %}</div>
-    {% if evidence %}<div class="card"><h2>Source evidence</h2>
-    <p>File: {{ evidence.file_name }} · offset: {{ evidence.file_offset }} · sequence: {{ evidence.sequence_number }} · group: {{ evidence.sequence_group_id }}</p>
+    return page("Audit evidence", """<p><a href="{{ url_for('events') }}">Back to audit trail</a></p>
+    <h1>Audit record {{ row.id }}</h1><div class="card record-card">
+    <dl class="record-details">
+    {% for key in row.keys() %}{% if key != 'statement' %}
+    <div><dt>{{ key|replace('_', ' ')|capitalize }}</dt><dd>{{ row[key] if row[key] is not none else '—' }}</dd></div>
+    {% endif %}{% endfor %}</dl></div>
+    <div class="card record-card"><h2>SQL statement</h2>
+    <pre class="code-box" tabindex="0" aria-label="SQL statement">{{ row.statement or 'No SQL text supplied by source.' }}</pre></div>
+    {% if evidence %}<div class="card record-card"><h2>Source evidence</h2>
+    <dl class="record-details evidence-meta">
+    <div><dt>Audit file</dt><dd>{{ evidence.file_name }}</dd></div>
+    <div><dt>File offset</dt><dd>{{ evidence.file_offset }}</dd></div>
+    <div><dt>Sequence number</dt><dd>{{ evidence.sequence_number }}</dd></div>
+    <div><dt>Sequence group</dt><dd>{{ evidence.sequence_group_id }}</dd></div></dl>
     <p>SQL text may be one fragment of a larger record. All available fragments are retained separately; sequence metadata is included in CSV.</p>
-    <pre>{{ evidence.raw_json }}</pre></div>{% endif %}""", row=row, evidence=source)
+    <details class="raw-evidence"><summary>View raw source JSON</summary>
+    <pre class="code-box" tabindex="0" aria-label="Raw source JSON">{{ evidence.raw_json }}</pre></details></div>{% endif %}""", row=row, evidence=source)
 
 
 @app.get("/events")
