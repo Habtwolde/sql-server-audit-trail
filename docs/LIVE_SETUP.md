@@ -1,4 +1,6 @@
-# First live connection on your Windows PC
+# On-premises Windows setup and local PC validation
+
+The deployment target is a Windows server hosting SQL Server, the web app and collector together. Browser users connect through the internal HTTPS site.
 
 ## 1. Update and install
 
@@ -7,7 +9,7 @@ Stop the old app with Ctrl+C. From the repository folder in PowerShell:
 ```powershell
 git pull
 pip install -r requirements.txt
-Copy-Item .env.example .env
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
@@ -91,25 +93,15 @@ The included script covers direct INSERT/UPDATE/DELETE, ALTER, dynamic SQL, MERG
 
 Reports use UTC calendar months. Excel-safe CSV escaping prefixes potentially active spreadsheet cells with an apostrophe; the source SQL is preserved unchanged in stored evidence. Approval decisions are tied to a report version and one person cannot approve a report they generated.
 
-## On-premises and EC2 trial deployment
+## On-premises Windows deployment
 
 On Windows, the same Python commands work under a service account; configure the web process and collector as separate managed services. Waitress replaces Flask's development server. Configure HTTPS/reverse proxy, restricted inbound access, backups and process supervision before shared access.
 
-The Linux container definitions include ODBC Driver 18. For a test using SQL authentication:
-
-```text
-docker compose build
-docker compose run --rm web python manage.py create-user reviewer --role Reviewer
-docker compose run --rm web python manage.py create-user approver --role Approver
-docker compose run --rm collector python collector.py --check
-docker compose up -d
-```
-
-The web port is bound to loopback. Use a deliberate HTTPS gateway/private network setup for remote access. Container Windows integrated authentication requires Kerberos/domain configuration; it does not inherit the Windows host's logged-in user. Never copy `.env` into an image. Web and collector share one local volume; do not scale them across hosts with SQLite.
+Keep HOST=127.0.0.1 and PORT=5000 behind IIS HTTPS. Set COOKIE_SECURE=true for shared HTTPS access. Use the same .env, local database and report paths for both managed processes. Do not put SQLite on a network share or run replicas across hosts. The container files are development utilities, not the Windows installation procedure.
 
 ## Remaining production work
 
-Windows web SSO; separate database repository; real S3 deployment validation; efficient incremental scanning under high load; fragment assembly; gap/retention monitoring; and a verified version/edition/workload compatibility matrix. These are explicit release gates, not assumed capabilities.
+Windows web SSO; separate database repository; efficient incremental scanning under high load; fragment assembly; gap/retention monitoring; and a verified version/edition/workload compatibility matrix. These are explicit release gates, not assumed capabilities.
 
 ## Automatic monthly CSV reports (no Task Scheduler)
 
@@ -170,4 +162,5 @@ does not certify capture completeness. Late-arriving records for an already
 reported month require a manually generated new version and another review.
 The delay reduces boundary races but does not guarantee all records have arrived.
 Scheduled CSVs use the same local AUDIT_REPORT_DIR as manual reports.
-Optional S3 history and storage configuration are described in [Report storage](REPORT_STORAGE.md).
+Local storage, backups and upgrade instructions are described in [Report storage](REPORT_STORAGE.md).
+

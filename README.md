@@ -14,7 +14,7 @@ Live SQL Server Audit reader and web application for SQL Server **2019 and newer
 - Live audit view, collection status, evidence detail, monthly CSV export and approval history.
 - Separate live and demo databases; live mode never seeds sample events.
 - Password-based application accounts, roles, CSRF protection, and a separate report approver.
-- Waitress web entry point for Windows/Linux; container definitions for on-premises/EC2 trials.
+- Waitress web entry point for the on-premises Windows server; local CSV storage.
 
 ## Important boundaries
 
@@ -25,7 +25,7 @@ Live SQL Server Audit reader and web application for SQL Server **2019 and newer
 - SQL text can span multiple records. Fragments are retained with sequence/group information; automatic statement reassembly is pending. CSV counts are record counts, not unique statement counts.
 - Native auditing only records configured actions. Stored-procedure ownership chaining, dynamic SQL, MERGE/TRUNCATE, denied operations and server/database scope require explicit coverage testing. SELECT is not enabled by the supplied configuration.
 - No automatic detection of every lost/deleted audit file or unaudited operation is claimed. First import includes retained history; deleted history cannot be recovered. Audit disablement, queue/disk failures and retention require operational monitoring.
-- Monthly CSV reports support manual generation and opt-in automatic scheduling inside the collector, including catch-up and duplicate prevention. See [automatic reporting setup](docs/LIVE_SETUP.md#automatic-monthly-csv-reports-no-task-scheduler). Reports still require human review. Local CSV storage is configurable, with optional retried S3 history. See [report storage](docs/REPORT_STORAGE.md).
+- Monthly CSV reports support manual generation and opt-in automatic scheduling inside the collector, including catch-up and duplicate prevention. See [automatic reporting setup](docs/LIVE_SETUP.md#automatic-monthly-csv-reports-no-task-scheduler). Reports still require human review. Local CSV storage is configurable and downloads verify the recorded SHA-256 digest. See [report storage](docs/REPORT_STORAGE.md).
 - All editions of SQL Server 2019+ are the compatibility target, not a completed test matrix. No real SQL Server instance or Windows SSO host was available during development. Docker files have not yet been built in the development environment.
 
 ## Run after configuration
@@ -55,7 +55,9 @@ These checks use a temporary repository and mocked ODBC responses; they validate
 - `storage.py`: shared local repository and mode separation.
 - `app.py`, `security.py`: web interface, authentication and permissions.
 - `manage.py`: create application accounts without command-line passwords.
+- `report_storage.py`: local CSV integrity checks and storage-path diagnostic.
 - `sql/`: DBA setup/permissions and manual test scenarios.
 - `.env.example`: configuration template; never commit your `.env`.
 
 To revisit the demo, set `AUDIT_MODE=demo` in `.env` and restart the web process. The original `instance/audit-demo.sqlite3` is preserved. Do not run the live collector in demo mode. Old demo report paths remain usable if their files still exist.
+

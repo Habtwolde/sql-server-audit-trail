@@ -63,17 +63,6 @@ CREATE TABLE IF NOT EXISTS report_scheduler_state (
     id INTEGER PRIMARY KEY CHECK(id=1), status TEXT NOT NULL,
     last_attempt TEXT NOT NULL, last_success TEXT, detail TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS report_archives (
-    report_id INTEGER PRIMARY KEY REFERENCES reports(id),
-    bucket TEXT NOT NULL, object_key TEXT NOT NULL,
-    encryption TEXT NOT NULL, kms_key TEXT NOT NULL,
-    status TEXT NOT NULL, last_attempt TEXT, archived_at TEXT,
-    version_id TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT ''
-);
-CREATE TABLE IF NOT EXISTS report_archive_state (
-    id INTEGER PRIMARY KEY CHECK(id=1), status TEXT NOT NULL,
-    last_attempt TEXT NOT NULL, detail TEXT NOT NULL
-);
 CREATE TABLE IF NOT EXISTS report_reviews (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     report_id INTEGER NOT NULL REFERENCES reports(id),
@@ -117,3 +106,4 @@ def initialize_store():
             if MODE == "live" and db.execute("SELECT count(*) FROM audit_events").fetchone()[0]:
                 raise RuntimeError("Refusing to treat existing unlabelled events as live data")
             db.execute("INSERT INTO repository_identity(mode) VALUES(?)", (MODE,))
+
