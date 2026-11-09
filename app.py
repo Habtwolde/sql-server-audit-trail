@@ -6,7 +6,7 @@ from functools import wraps
 
 from flask import Flask, abort, redirect, render_template_string, request, send_file, session, url_for
 
-from storage import MODE, REPORT_DIR, connect, initialize_store
+from storage import begin_write, limited, case_insensitive, MODE, REPORT_DIR, connect, initialize_store
 from reporting import generate_monthly_report
 from security import configure_security
 
@@ -154,7 +154,7 @@ def logout():
 def home():
     with connect() as db:
         total = db.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
-        recent = db.execute("SELECT * FROM audit_events ORDER BY event_time DESC LIMIT 8").fetchall()
+        recent = db.execute(limited("SELECT * FROM audit_events ORDER BY event_time DESC", 8)).fetchall()
         pending = db.execute("SELECT COUNT(*) FROM reports WHERE status='Pending'").fetchone()[0]
     body = """
     <h1>Audit dashboard</h1><p class="muted">{{ source_message }}</p>
@@ -224,12 +224,12 @@ def events():
     params = selected_accounts
     if selected_accounts:
         placeholders = ",".join("?" for _ in selected_accounts)
-        query += " WHERE login_name COLLATE NOCASE IN (" + placeholders + ")"
-    query += " ORDER BY event_time DESC, id DESC LIMIT 500"
+        query += " WHERE " + case_insensitive("login_name") + " IN (" + placeholders + ")"
+    query = limited(query + " ORDER BY event_time DESC, id DESC", 500)
     with connect() as db:
         rows = db.execute(query, params).fetchall()
         accounts = [r[0] for r in db.execute(
-            "SELECT DISTINCT login_name FROM audit_events WHERE login_name IS NOT NULL AND login_name != '' ORDER BY login_name COLLATE NOCASE"
+            "SELECT DISTINCT login_name FROM audit_events WHERE login_name IS NOT NULL AND login_name != '' ORDER BY login_name"
         ).fetchall()]
     body = """
     <h1>Audit trail</h1><p>Latest 500 matching records. Monthly CSV includes all collected records for the period.</p>
@@ -327,7 +327,7 @@ def decide_report(report_id):
     if decision not in ("Approved", "Rejected"):
         abort(400)
     with connect() as db:
-        db.execute("BEGIN IMMEDIATE")
+        begin_write(db)
         report = db.execute("SELECT * FROM reports WHERE id=?", (report_id,)).fetchone()
         if not report or report["status"] != "Pending":
             abort(409)

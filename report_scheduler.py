@@ -5,7 +5,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 from reporting import SCHEDULE_ACTOR, generate_monthly_report, month_bounds
-from storage import MODE, connect, initialize_store
+from storage import upsert_state, begin_write, MODE, connect, initialize_store
 
 
 def schedule_settings():
@@ -45,14 +45,11 @@ def due_periods(now=None):
 
 def set_reporting_state(status, detail, now):
     with connect() as db:
-        db.execute(
-            "INSERT INTO report_scheduler_state(id,status,last_attempt,last_success,detail) "
-            "VALUES(1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
-            "status=excluded.status,last_attempt=excluded.last_attempt,"
-            "last_success=COALESCE(excluded.last_success,report_scheduler_state.last_success),"
-            "detail=excluded.detail",
-            (status, now.isoformat(), now.isoformat() if status == "Ready" else None, detail)
-        )
+        begin_write(db)
+        upsert_state(db, "report_scheduler_state", {"id": 1}, {
+            "status": status, "last_attempt": now.isoformat(),
+            "last_success": now.isoformat() if status == "Ready" else None, "detail": detail,
+        }, preserve=("last_success",))
 
 
 def run_due_reports(now=None):
@@ -94,9 +91,6 @@ def main():
             return
         if MODE != "live":
             raise ValueError("Live mode required")
-        if settings is None:
-            print(json.dumps({"status": "Disabled", "generated": []}))
-            return
         from collector import poll_once
         print(json.dumps({"collection": poll_once()}), flush=True)
         result = run_due_reports()
@@ -110,3 +104,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

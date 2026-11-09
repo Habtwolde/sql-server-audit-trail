@@ -2,7 +2,7 @@
 import argparse
 import getpass
 from werkzeug.security import generate_password_hash
-from storage import connect, initialize_store
+from storage import begin_write, connect, initialize_store
 
 
 def main():
@@ -12,13 +12,14 @@ def main():
     parser.add_argument("--role", choices=["Viewer", "Reviewer", "Approver", "Administrator"], required=True)
     args = parser.parse_args()
     username = args.username.strip().lower()
-    if not username:
-        parser.error("Username cannot be empty")
+    if not username or len(username) > 128:
+        parser.error("Username must contain 1 to 128 characters")
     password = getpass.getpass("Password (at least 12 characters): ")
     if len(password) < 12 or password != getpass.getpass("Confirm password: "):
         parser.error("Passwords must match and contain at least 12 characters")
     initialize_store()
     with connect() as db:
+        begin_write(db)
         if db.execute("SELECT 1 FROM app_users WHERE username=?", (username,)).fetchone():
             parser.error("Account already exists")
         db.execute("INSERT INTO app_users VALUES(?,?,?)", (username, generate_password_hash(password), args.role))
@@ -27,3 +28,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

@@ -97,11 +97,11 @@ Reports use UTC calendar months. Excel-safe CSV escaping prefixes potentially ac
 
 On Windows, the same Python commands work under a service account; configure the web process and collector as separate managed services. Waitress replaces Flask's development server. Configure HTTPS/reverse proxy, restricted inbound access, backups and process supervision before shared access.
 
-Keep HOST=127.0.0.1 and PORT=5000 behind IIS HTTPS. Set COOKIE_SECURE=true for shared HTTPS access. Use the same .env, local database and report paths for both managed processes. Do not put SQLite on a network share or run replicas across hosts. The container files are development utilities, not the Windows installation procedure.
+Keep HOST=127.0.0.1 and PORT=5000 behind IIS HTTPS. Set COOKIE_SECURE=true for shared HTTPS access. Use the same .env, application database and report directory for both managed processes. For the dedicated SQL Server repository, follow [setup and migration](SQL_SERVER_STORE.md). Do not put SQLite on a network share or run replicas across hosts. The container files are development utilities, not the Windows installation procedure.
 
 ## Remaining production work
 
-Windows web SSO; separate database repository; efficient incremental scanning under high load; fragment assembly; gap/retention monitoring; and a verified version/edition/workload compatibility matrix. These are explicit release gates, not assumed capabilities.
+Windows web SSO; real SQL Server repository validation; efficient incremental scanning under high load; fragment assembly; gap/retention monitoring; and a verified version/edition/workload compatibility matrix. These are explicit release gates, not assumed capabilities.
 
 ## Automatic monthly CSV reports (no Task Scheduler)
 
@@ -119,7 +119,7 @@ Months use UTC boundaries, matching the current CSV report convention. The
 delay is configurable from 0 through 168 hours.
 
 After pulling the new code, restart the web app and collector. The existing
-SQLite database is upgraded by creating new scheduling tables; existing audit
+application repository is initialized with scheduling tables; existing audit
 records, reports and review decisions remain available.
 
 ```powershell
@@ -127,8 +127,8 @@ python report_scheduler.py --status
 python collector.py
 ```
 
---status displays enabled/start/delay/due months and does not connect to SQL
-Server or generate a report. The continuous collector checks for due reports
+--status displays enabled/start/delay/due months and does not read source audit
+files or generate a report. It connects to the configured application repository. The continuous collector checks for due reports
 after every successful full audit-file scan. --check never generates reports;
 collector.py --once also processes due reports when enabled. To explicitly
 collect once and process all due reports:
@@ -142,7 +142,7 @@ schedule. No additional scheduled task or scheduler process is needed. Process
 startup/restart remains the hosting platform's responsibility.
 
 Closed months are processed oldest first, including missed months after downtime.
-One scheduled report per calendar month is recorded transactionally in SQLite,
+One scheduled report per calendar month is recorded transactionally in the application database,
 so restarts or concurrent calls do not create duplicate scheduled versions.
 Manually generated reports do not suppress the automatic report; both use the
 existing version numbering. Empty months receive a zero-record CSV so that a

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from security import csv_cell
-from storage import REPORT_DIR, connect
+from storage import begin_write, insert_id, REPORT_DIR, connect
 
 
 SCHEDULE_ACTOR = "system:monthly-scheduler"
@@ -26,7 +26,7 @@ def month_bounds(period):
 def generate_monthly_report(period, created_by, scheduled=False, now=None):
     """Create one immutable snapshot; scheduled periods are unique across workers.
 
-    The SQLite write lock covers allocation, snapshot, file publication and the
+    The application write lock covers allocation, snapshot, file publication and the
     scheduled-period marker. An interrupted run can leave an unreferenced file;
     retrying replaces that orphan before committing a report entry.
     """
@@ -35,7 +35,7 @@ def generate_monthly_report(period, created_by, scheduled=False, now=None):
     published = temporary = None
     try:
         with connect() as db:
-            db.execute("BEGIN IMMEDIATE")
+            begin_write(db)
             if scheduled:
                 existing = db.execute(
                     "SELECT report_id FROM scheduled_reports WHERE period=?", (period,)
@@ -52,12 +52,12 @@ def generate_monthly_report(period, created_by, scheduled=False, now=None):
             version = db.execute(
                 "SELECT COALESCE(MAX(version),0)+1 FROM reports WHERE period=?", (period,)
             ).fetchone()[0]
-            report_id = db.execute(
+            report_id = insert_id(db,
                 "INSERT INTO reports(period,version,created_at,created_by,event_count,file_path,sha256,status) "
                 "VALUES(?,?,?,?,?,?,?,?)",
                 (period, version, now.astimezone(timezone.utc).isoformat(), created_by,
                  len(rows), "", "", "Pending")
-            ).lastrowid
+            )
             output = io.StringIO(newline="")
             writer = csv.writer(output)
             writer.writerow(["Event ID","Event Time UTC","Server","Database","Login","Effective User",
@@ -94,3 +94,4 @@ def generate_monthly_report(period, created_by, scheduled=False, now=None):
         if published is not None:
             published.unlink(missing_ok=True)
         raise
+

@@ -12,7 +12,7 @@ import time
 from contextlib import closing
 from datetime import datetime, timezone
 
-from storage import MODE, connect, initialize_store
+from storage import upsert_state, begin_write, insert_id, MODE, connect, initialize_store
 
 
 def utc_now():
@@ -41,13 +41,11 @@ def settings():
 def set_state(source, status, detail, version=None, edition=None, success=False):
     now = utc_now()
     with connect() as db:
-        db.execute("""INSERT INTO collector_state(source_id,last_attempt,last_success,status,detail,server_version,edition)
-        VALUES(?,?,?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET
-        last_attempt=excluded.last_attempt, last_success=COALESCE(excluded.last_success,collector_state.last_success),
-        status=excluded.status, detail=excluded.detail,
-        server_version=COALESCE(excluded.server_version,collector_state.server_version),
-        edition=COALESCE(excluded.edition,collector_state.edition)""",
-        (source, now, now if success else None, status, detail, version, edition))
+        begin_write(db)
+        upsert_state(db, "collector_state", {"source_id": source}, {
+            "last_attempt": now, "last_success": now if success else None,
+            "status": status, "detail": detail, "server_version": version, "edition": edition,
+        }, preserve=("last_success", "server_version", "edition"))
 
 
 def ingest(source, record):
@@ -66,10 +64,10 @@ def ingest(source, record):
     outcome = "Permission check passed" if record.get("succeeded") else "Permission check failed"
     now = utc_now()
     with connect() as db:
-        db.execute("BEGIN IMMEDIATE")
+        begin_write(db)
         if db.execute("SELECT 1 FROM source_records WHERE record_key=?", (key,)).fetchone():
             return False
-        event_id = db.execute("""INSERT INTO audit_events(event_time,server_name,database_name,login_name,effective_user,
+        event_id = insert_id(db, """INSERT INTO audit_events(event_time,server_name,database_name,login_name,effective_user,
         application_name,client_host,schema_name,object_name,operation,outcome,statement)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (
             serializable(event_time), record.get("server_instance_name") or "",
@@ -77,14 +75,14 @@ def ingest(source, record):
             record.get("database_principal_name") or record.get("server_principal_name") or "",
             record.get("application_name") or "", record.get("host_name") or record.get("client_ip") or "",
             record.get("schema_name") or "", record.get("object_name") or "", operation, outcome, record.get("statement") or ""
-        )).lastrowid
+        ))
         group = record.get("sequence_group_id")
         db.execute("INSERT INTO source_records VALUES(?,?,?,?,?,?,?,?,?,?)", (
             key, event_id, source, file_name, record["audit_file_offset"], record.get("sequence_number"),
             serializable(group) if group is not None else "", action, now, raw))
-        db.execute("""INSERT INTO source_files VALUES(?,?,?,?) ON CONFLICT(source_id,file_name) DO UPDATE SET
-        max_offset=MAX(source_files.max_offset,excluded.max_offset),last_seen=excluded.last_seen""",
-        (source, file_name, record["audit_file_offset"], now))
+        upsert_state(db, "source_files", {"source_id": source, "file_name": file_name},
+                     {"max_offset": record["audit_file_offset"], "last_seen": now},
+                     maximum=("max_offset",))
     return True
 
 

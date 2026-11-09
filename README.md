@@ -19,7 +19,7 @@ Live SQL Server Audit reader and web application for SQL Server **2019 and newer
 ## Important boundaries
 
 - Windows authentication for the **SQL connection** is implemented. Windows single sign-on for **web users** is a separate, pending integration. The web app currently uses local password accounts.
-- The evidence store is currently SQLite on one host. A separate SQL Server/PostgreSQL audit repository is pending. Do not share its file across hosts or a network share.
+- A dedicated SQL Server application database is available through `AUDIT_STORE_CONNECTION_STRING`; legacy SQLite stores remain supported for migration. Real SQL Server integration testing is required before switching. Do not put legacy SQLite files on a network share.
 - The worker replays retained files and deduplicates them. Per-file offsets are persisted for diagnostics, not used to skip records. This prioritizes safe replay in the integration build; performance must be assessed before production.
 - SQL Server Audit `succeeded` is labelled as a permission-check result. It does not establish statement completion or transaction commit.
 - SQL text can span multiple records. Fragments are retained with sequence/group information; automatic statement reassembly is pending. CSV counts are record counts, not unique statement counts.
@@ -52,12 +52,20 @@ These checks use a temporary repository and mocked ODBC responses; they validate
 ## Files
 
 - `collector.py`: SQL Server Audit reader and polling process.
-- `storage.py`: shared local repository and mode separation.
+- `storage.py`: shared SQL Server / legacy SQLite repository and mode separation.
 - `app.py`, `security.py`: web interface, authentication and permissions.
 - `manage.py`: create application accounts without command-line passwords.
 - `report_storage.py`: local CSV integrity checks and storage-path diagnostic.
 - `sql/`: DBA setup/permissions and manual test scenarios.
 - `.env.example`: configuration template; never commit your `.env`.
 
-To revisit the demo, set `AUDIT_MODE=demo` in `.env` and restart the web process. The original `instance/audit-demo.sqlite3` is preserved. Do not run the live collector in demo mode. Old demo report paths remain usable if their files still exist.
+To revisit the demo, set `AUDIT_MODE=demo` in `.env` and restart the web process. Use a separate demo application database when SQL Server storage is configured; otherwise the original `instance/audit-demo.sqlite3` is preserved. Do not run the live collector in demo mode. Old demo report paths remain usable if their files still exist.
 
+
+## SQL Server repository (Developer testing / on-premises production)
+
+The application can store its data in a dedicated SQL Server database instead of
+SQLite. Set `AUDIT_STORE_CONNECTION_STRING`, then initialize and validate before
+starting the app. Existing SQLite data is not copied automatically.
+See [SQL Server repository setup and migration](docs/SQL_SERVER_STORE.md) for
+backup, migration, SQL Server Agent, permission and real integration-test steps.

@@ -1,3 +1,8 @@
+> For SQL Server application storage, follow [SQL Server repository setup](SQL_SERVER_STORE.md).
+> `AUDIT_DB_PATH` below applies only to legacy SQLite deployments. SQL Server
+> deployments use `AUDIT_STORE_CONNECTION_STRING` and SQL Server database backups;
+> CSV directory configuration and checksum verification are unchanged.
+
 # Local report storage on the on-premises Windows server
 
 ## Configure persistent paths

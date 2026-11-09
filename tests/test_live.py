@@ -10,13 +10,14 @@ from unittest.mock import MagicMock, patch
 _temp = tempfile.TemporaryDirectory()
 os.environ.update(AUDIT_MODE="live", AUDIT_INSTANCE_DIR=_temp.name,
                   AUDIT_DB_PATH=os.path.join(_temp.name, "test.sqlite3"),
+                  AUDIT_STORE_CONNECTION_STRING=os.environ.get("AUDIT_TEST_STORE_CONNECTION_STRING", ""),
                   AUDIT_REPORT_DIR=os.path.join(_temp.name, "reports"),
                   FLASK_SECRET_KEY="test-secret-" * 8,
                   SQL_SOURCE_ID="test-source", SQL_CONNECTION_STRING="test-only",
                   SQL_AUDIT_FILE_PATTERN="test-only*.sqlaudit")
 from app import app
 from collector import ingest, poll_once
-from storage import connect
+from storage import BACKEND, connect, limited
 from werkzeug.security import generate_password_hash
 
 
@@ -105,13 +106,13 @@ class LiveTests(unittest.TestCase):
         self.assertTrue(ingest("test-source", record(sequence_group_id=b"another-event")))
         with connect() as db:
             self.assertEqual(db.execute("SELECT count(*) FROM audit_events").fetchone()[0], 3)
-            row = db.execute("SELECT * FROM audit_events LIMIT 1").fetchone()
+            row = db.execute(limited("SELECT * FROM audit_events", 1)).fetchone()
             self.assertEqual(row["login_name"], "DOMAIN\\actor")
             self.assertEqual(row["outcome"], "Permission check passed")
 
     def test_atomic_failure_does_not_leave_orphan_event(self):
         with connect() as db:
-            db.execute("CREATE TRIGGER reject_evidence BEFORE INSERT ON source_records BEGIN SELECT RAISE(ABORT,'test failure'); END;")
+            db.execute("CREATE TRIGGER dbo.reject_evidence ON dbo.source_records AFTER INSERT AS BEGIN THROW 51000, 'test failure', 1; END" if BACKEND == "sqlserver" else "CREATE TRIGGER reject_evidence BEFORE INSERT ON source_records BEGIN SELECT RAISE(ABORT,'test failure'); END;")
         try:
             with self.assertRaises(Exception):
                 ingest("test-source", record())
@@ -119,7 +120,7 @@ class LiveTests(unittest.TestCase):
                 self.assertEqual(db.execute("SELECT count(*) FROM audit_events").fetchone()[0], 0)
         finally:
             with connect() as db:
-                db.execute("DROP TRIGGER reject_evidence")
+                db.execute("DROP TRIGGER dbo.reject_evidence" if BACKEND == "sqlserver" else "DROP TRIGGER reject_evidence")
 
     def test_web_auth_csrf_and_read_only_role(self):
         self.assertEqual(self.client.get("/events").status_code, 302)
@@ -322,6 +323,43 @@ class LiveTests(unittest.TestCase):
         status = json.loads(output.getvalue())
         self.assertEqual(status["storage"], "local")
         self.assertEqual(status["local_report_directory"], os.environ["AUDIT_REPORT_DIR"])
+
+    @unittest.skipUnless(BACKEND == "sqlserver", "Requires real SQL Server")
+    def test_sqlite_migration_preserves_identity_and_rejects_second_run(self):
+        import sqlite3
+        from pathlib import Path
+        from storage import SCHEMA
+        from migrate_store import migrate
+        source_path = Path(_temp.name) / "migration.sqlite3"
+        source_path.unlink(missing_ok=True)
+        with sqlite3.connect(source_path) as source:
+            source.executescript(SCHEMA)
+            source.execute("INSERT INTO repository_identity VALUES('live')")
+            source.execute("INSERT INTO app_users VALUES(?,?,?)", ("migrated", "preserved-hash", "Viewer"))
+            source.execute("INSERT INTO audit_events VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                           (17, "2026-10-28T13:01:02.000000+00:00", "TEST", "Db", "actor", "dbo",
+                            "test", "host", "dbo", "Probe", "UPDATE", "Permission check passed", "ሙከራ"))
+            source.execute("INSERT INTO reports VALUES(?,?,?,?,?,?,?,?,?)",
+                           (23, "2026-10", 7, "2026-11-01", "reviewer", 1, "existing.csv", "a" * 64, "Approved"))
+            source.execute("INSERT INTO report_reviews VALUES(?,?,?,?,?,?)",
+                           (31, 23, "approver", "Approved", "preserved decision", "2026-11-01"))
+        with connect() as db:
+            db.execute("DELETE FROM app_users")
+        result = migrate(source_path)
+        self.assertEqual(result["audit_events"], 1)
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT id,statement FROM audit_events").fetchone()[0], 17)
+            self.assertEqual(db.execute("SELECT comment FROM report_reviews WHERE id=31").fetchone()[0], "preserved decision")
+        with self.assertRaises(ValueError):
+            migrate(source_path)
+
+    def test_agent_command_collects_when_reporting_disabled(self):
+        from report_scheduler import main
+        with patch.dict(os.environ, {"REPORT_SCHEDULE_ENABLED": "false"}), patch(
+                "sys.argv", ["report_scheduler.py", "--run-due"]), patch(
+                "collector.poll_once", return_value={"inserted": 0}) as collect, patch("builtins.print"):
+            main()
+            collect.assert_called_once()
 
     def fake_sql(self, major=15):
         sql = MagicMock()
