@@ -47,7 +47,9 @@ def generate_monthly_report(period, created_by, scheduled=False, now=None):
                 "s.sequence_group_id, s.action_id, s.collected_at "
                 "FROM audit_events e LEFT JOIN source_records s ON s.event_id=e.id "
                 "WHERE e.event_time >= ? AND e.event_time < ? ORDER BY e.event_time, e.id",
-                (start.isoformat(), end.isoformat())
+                # Match collector.serializable(): fixed-width UTC microseconds.
+                # SQL Server string collations can order mixed precision differently.
+                (start.isoformat(timespec="microseconds"), end.isoformat(timespec="microseconds"))
             ).fetchall()
             version = db.execute(
                 "SELECT COALESCE(MAX(version),0)+1 FROM reports WHERE period=?", (period,)

@@ -147,6 +147,17 @@ class LiveTests(unittest.TestCase):
         self.assertEqual(rows[1][12], "<script>alert(1)</script>")
         self.assertEqual(len(rows[0]), len(rows[1]))
 
+    def test_exact_month_edges_use_same_timestamp_precision(self):
+        from reporting import generate_monthly_report
+        dates = [datetime(2026, 9, 30, 23, 59, 59, 999999),
+                 datetime(2026, 10, 1),
+                 datetime(2026, 10, 31, 23, 59, 59, 999999),
+                 datetime(2026, 11, 1)]
+        for index, when in enumerate(dates):
+            ingest("test-source", record(event_time=when, sequence_number=index + 1))
+        self.assertEqual(generate_monthly_report("2026-10", "reviewer")["records"], 2)
+        self.assertEqual(generate_monthly_report("2026-11", "reviewer")["records"], 1)
+
     def test_approval_separation_and_decision_history(self):
         self.login("reviewer")
         self.post("/reports/generate", period="2026-10")
